@@ -1153,6 +1153,52 @@ await check("the team snapshot route feeds the sidebar panel", () => {
   assert.equal(rejected.statusCode, 405);
 });
 
+await check("the console action route dispatches to the real tool", async () => {
+  const route = routes.get(T.ACTION_ROUTE);
+  assert.ok(route, "action route must be registered alongside the snapshot route");
+
+  const invoke = async (payload) => {
+    const listeners = new Map();
+    const req = {
+      method: "POST",
+      headers: {},
+      on(event, callback) {
+        listeners.set(event, callback);
+        return req;
+      }
+    };
+    const res = {
+      statusCode: 0,
+      headers: {},
+      body: "",
+      setHeader() {},
+      end(value) {
+        this.body = value;
+      }
+    };
+    route.handler(req, res);
+    listeners.get("data")?.(JSON.stringify(payload));
+    listeners.get("end")?.();
+    // The handler resolves the tool promise on a later microtask.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return res;
+  };
+
+  const raised = await invoke({ tool: "team_capacity_set", args: { max_members: 12 } });
+  assert.equal(raised.statusCode, 200);
+  const raisedPayload = JSON.parse(raised.body);
+  assert.equal(raisedPayload.after, 12, `the UI must reach the same implementation the model does; got ${raised.body}`);
+  assert.equal(raisedPayload.configured, 12, "and the double write must still happen");
+
+  const unknown = await invoke({ tool: "spawn_teammate", args: {} });
+  assert.equal(unknown.statusCode, 400);
+  assert.match(JSON.parse(unknown.body).reason, /unknown tool/);
+
+  const wrongMethod = { statusCode: 0, headers: {}, setHeader() {}, end() {} };
+  route.handler({ method: "GET", headers: {} }, wrongMethod);
+  assert.equal(wrongMethod.statusCode, 405);
+});
+
 await check("new agents get the tools installed", () => {
   const created = listeners.find((listener) => listener.event === "agent/created");
   assert.ok(created, "agent/created listener was not registered");
