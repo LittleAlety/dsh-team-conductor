@@ -1,8 +1,21 @@
 # dsh-team-conductor
 
-**一句话定位：** DeepSeek Harness Agent Teams 的统一控制面——一次看清 roster 与每个成员的上下文压力、就地增删与编辑成员、运行时调整成员上限，并把消息送达到按名字寻址不了的非 roster 子代理。
+**一句话定位：** DeepSeek Harness Agent Teams 的统一控制面——一次看清 roster 与每个成员的上下文压力、就地增删与编辑成员、运行时调整容量、按名字或子会话 id 把消息送达，并自带共享任务板与可选的自动派活。
 
-**它叠加，而不是替换内核 team 工具。** 插件只新增六个工具（`team_overview` / `team_member_edit` / `team_capacity_set` / `team_message` / `team_member_add` / `team_member_delete`）、注入一段 prompt 段、安装两个包装型守卫（结算通知去重、已删成员消息拦截）。它不注册同名工具去覆盖内核，也不 `disabled: true` 任何内核行：内核的 `spawn_teammate`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`、`team_task_create/list/get/update` 以及 profile 的每一行都原样保留、照常工作。
+**它有两种底层，工具面相同，靠一个配置切换**（详见 [两个委派引擎](#两个委派引擎delegationengine)）：
+
+| | `kernel`（默认） | `conductor` |
+|---|---|---|
+| 成员是什么 | 内核 Agent Teams 的 roster 条目 | 本插件用 `subagents.startContinuable` 起的可续接子代理 |
+| 名册在哪 | 内核 roster（只增不删、名字永不复用） | 插件侧车 `teams/<root>.json`（随便改） |
+| 删除一个成员 | 墓碑 + 拦消息 + **上限 +1 补偿** | drain 子代理，**名额还给池**、**名字可复用** |
+| 需要内核 Team 包 | 需要 | **不需要**（对应三条实体置 `disabled: true`） |
+
+九个工具全场一致：`team_overview`（roster + 上下文压力 + 容量 + 结算通知账本）、`team_member_edit`（13 个 action）、`team_member_add`、`team_member_delete`、`team_capacity_set`、`team_message`、以及自带任务板的 `team_task_add` / `team_task_list` / `team_task_update`（依赖、CAS revision、写作用域重叠警告）。
+
+**`kernel` 引擎下它叠加而不替换**：不动任何内核行，内核的 `spawn_teammate`、`send_message`、`list_agents`… 全部照常工作。**`conductor` 引擎下它接管**：内核 `agent-team` / `tool-agent-team` / `ui-agent-team` 三条实体置 `disabled: true`，并把七个旧工具名注册成**转发别名**（`spawn_teammate` → `team_member_add` 等），所以任何还写着旧名字的提示、技能或习惯都会落到本插件，而不是报 "unknown tool"。
+
+此外它还：注入一段 `team:conductor:policy` prompt 段（**按引擎生成**，不含另一套底层的说法）、安装两个包装型守卫（结算通知去重、已删成员消息拦截）、提供浏览器半边（工具卡片、设置里的控制台、会话页头的「Agent Team」按钮）和四条回环路由（`/status`、`/client-hello`、`/team`、`/action`）。
 
 ---
 
@@ -15,7 +28,7 @@ dsh-team-conductor/
 ├── package.json         # 包元数据 + dsh.bundle.patch 指向 cordis.patch.yml + dsh.client
 ├── cordis.patch.yml     # bundle patch：只 insert 一行 team-conductor
 ├── lib/index.js         # 宿主半边（host half，全部逻辑在这里）
-├── lib/client.js        # 浏览器半边（把六个工具渲染成紧凑卡片）
+├── lib/client.js        # 浏览器半边（工具卡片 + 设置控制台 + 页头按钮）
 ├── scripts/verify-live.mjs  # 断言运行中的进程确实是这一版
 ├── tests/smoke.mjs      # 自包含 smoke 套件（伪造 cordis ctx 与宿主服务）
 └── docs/
@@ -26,7 +39,7 @@ dsh-team-conductor/
 
 ### 浏览器半边：工具卡片
 
-GUI 的工具卡片是按**工具名**查 `tool.call.toolview` 插槽决定的；没有专属渲染时，结果就是一段原始 JSON。`lib/client.js` 为六个工具各注册一个卡片：
+GUI 的工具卡片是按**工具名**查 `tool.call.toolview` 插槽决定的；没有专属渲染时，结果就是一段原始 JSON。`lib/client.js` 为九个工具各注册一个卡片：
 
 | 工具 | 卡片内容 |
 |---|---|
@@ -77,7 +90,7 @@ dsh plugin --profile desktop add "file:C:/Users/Little Alety/Documents/deepseek-
 
 等价的手工操作是：在 profile 的 `package.json` 里加 `"dsh-team-conductor": "file:<绝对路径>"`，并把 `"dsh-team-conductor"` 追加到 `dsh.profile.bundles` 数组。也可以在 Web 侧边栏的 **Plugins** 页安装/勾选。bundle 的 `dsh.bundle.patch` 会让 profile 应用本包自带的 `cordis.patch.yml`，其中只有一行 `insert: [{ id: team-conductor, name: 'dsh-team-conductor' }]`。
 
-插件在每次组合装载时：为每个 live Team 成员（Lead 与 teammate）的 agent scope 注册六个工具 + 一个 prompt 段，并（在服务可用时）安装两个守卫——结算通知去重（装在激活注册表上）与已删成员消息拦截（装在 `agentTeams.sendMessage` 上）。工具只在 Team 成员的 scope 上注册——非成员 agent 看不到它们。
+插件在每次组合装载时：为每个 live Team 成员（Lead 与 teammate）的 agent scope 注册九个工具 + 一个 prompt 段，并（在服务可用时）安装两个守卫——结算通知去重（装在激活注册表上）与已删成员消息拦截（装在 `agentTeams.sendMessage` 上）。工具只在 Team 成员的 scope 上注册——非成员 agent 看不到它们。
 
 ## 卸载
 
@@ -86,7 +99,7 @@ dsh plugin --profile desktop add "file:C:/Users/Little Alety/Documents/deepseek-
 1. **Web 侧边栏 → Plugins 页**取消勾选 `dsh-team-conductor`，并用该页的卸载动作移除包（其内部执行 `pnpm remove`）。
 2. **手工等价操作：** 从 profile 的 `package.json` 的 `dsh.profile.bundles` 数组里删掉 `"dsh-team-conductor"`，再从 `dependencies` 删掉对应条目，然后在该 profile 目录执行 `pnpm install`。bundle 选择只影响 `dsh.profile.bundles`；仅禁用（保留 dependency）不会撤销 bundle。
 
-撤下后六个工具、prompt 段与两个守卫一起消失；侧车状态文件（见下）不会自动删除。
+撤下后九个工具、prompt 段与两个守卫一起消失；侧车状态文件（见下）不会自动删除。
 
 ---
 
@@ -96,11 +109,11 @@ dsh plugin --profile desktop add "file:C:/Users/Little Alety/Documents/deepseek-
 
 ---
 
-## 六个工具
+## 九个工具
 
-六个工具都在 Team 成员的 agent scope 上注册，返回约定一致：**单个 `text` 块，其内容是 JSON 文档**。这一输出契约对六个工具都相同（`lib/index.js` 的 `TEXT_OUTPUT_SCHEMA`；`tools.register()` 要求 `output { schema, render }`，见 `@deepseek-ai/dsh-tools/lib/index.js:2878-2886`）。
+九个工具都在 Team 成员的 agent scope 上注册，返回约定一致：**单个 `text` 块，其内容是 JSON 文档**。这一输出契约对九个工具都相同（`lib/index.js` 的 `TEXT_OUTPUT_SCHEMA`；`tools.register()` 要求 `output { schema, render }`，见 `@deepseek-ai/dsh-tools/lib/index.js:2878-2886`）。
 
-所有 `parameters` 手写为内核接受的 JSON Schema 子集（`type` / `oneOf` / `properties` / `required` / `additionalProperties` / `items` / `enum` / `const` + 注解；子集定义见 `@deepseek-ai/dsh-tools/lib/index.js:34-49`），六个工具的参数对象都 `additionalProperties: false`——**多传字段会被拒绝**（`lib/index.js` 的 `assertArgumentShape()` 在每次执行前校验）。
+所有 `parameters` 手写为内核接受的 JSON Schema 子集（`type` / `oneOf` / `properties` / `required` / `additionalProperties` / `items` / `enum` / `const` + 注解；子集定义见 `@deepseek-ai/dsh-tools/lib/index.js:34-49`），九个工具的参数对象都 `additionalProperties: false`——**多传字段会被拒绝**（`lib/index.js` 的 `assertArgumentShape()` 在每次执行前校验）。
 
 ### 1. `team_overview`
 
@@ -527,14 +540,14 @@ curl -i http://127.0.0.1:19387/dsh-team-conductor/status
 node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一版（重启后跑这个）
 ```
 
-> **改完代码必须重启 Harness。** 宿主插件的模块被 ESM loader 缓存，磁盘上的新代码不会热生效——运行中的进程会一直服务它首次 import 的那一版。`scripts/verify-live.mjs` 就是用来区分「磁盘上是 0.5.0」和「进程里真的是 0.5.0」的：版本号、六个工具、两个守卫状态逐项断言，不一致时退出码非 0 并直接提示重启。
+> **改完代码必须重启 Harness。** 宿主插件的模块被 ESM loader 缓存，磁盘上的新代码不会热生效——运行中的进程会一直服务它首次 import 的那一版。`scripts/verify-live.mjs` 就是用来区分「磁盘上是 0.6.0」和「进程里真的是 0.6.0」的：版本号、九个工具、两个守卫状态逐项断言，不一致时退出码非 0 并直接提示重启。
 
-`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），**共 62 项**，覆盖：插件导出面、六个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱与 owner 重校验）、**冷启动下 `webServer` 晚绑定后状态路由经钩子补注册**、`team_overview` 的测量/容量/账本/子代理过滤/`availability`/`include_pressure` 跳过路径、`team_member_edit` 全部 12 个 action 与参数拒绝（含 rename 冲突与可回退旧名、`lead` 保留名拒绝、reassign 的 `taskHandover` 两种结局）、`team_capacity_set` 的双写与两条拒绝路径、`team_message` 的两条投递通道、删除后按名字与**按 id** 的双重拦截、目标解析（含历史名与 id 形状收紧）、饱和梯子、账本分组与缓存、侧车往返/缓存失效/按 root 隔离、detached header 完整性、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
+`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），**共 70 项**，覆盖：插件导出面、九个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱与 owner 重校验）、**冷启动下 `webServer` 晚绑定后状态路由经钩子补注册**、`team_overview` 的测量/容量/账本/子代理过滤/`availability`/`include_pressure` 跳过路径、`team_member_edit` 全部 13 个 action 与参数拒绝（含 rename 冲突与可回退旧名、`lead` 保留名拒绝、reassign 的 `taskHandover` 两种结局）、`team_capacity_set` 的双写与两条拒绝路径、`team_message` 的两条投递通道、删除后按名字与**按 id** 的双重拦截、目标解析（含历史名与 id 形状收紧）、饱和梯子、账本分组与缓存、侧车往返/缓存失效/按 root 隔离、detached header 完整性、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
 
 状态路由（`GET`/`HEAD`，其余方法 405；非回环来源 403）返回：
 
 ```json
-{ "ok": true, "plugin": "dsh-team-conductor", "version": "0.5.0",
+{ "ok": true, "plugin": "dsh-team-conductor", "version": "0.6.0",
   "teamService": true,
   "tools": ["team_overview", "team_member_edit", "team_capacity_set", "team_message",
             "team_member_add", "team_member_delete"],
@@ -602,7 +615,7 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 
 ## 兼容性
 
-- **插件版本：** 本文档对齐 `0.5.0`（`package.json` 的 `version` 与 `lib/index.js` 的 `PLUGIN_VERSION` 一致；状态路由自报同一版本号）。
+- **插件版本：** 本文档对齐 `0.6.0`（`package.json` 的 `version` 与 `lib/index.js` 的 `PLUGIN_VERSION` 一致；状态路由自报同一版本号）。
 - **内核版本：** 面向 DeepSeek Harness `0.2.0-rc.2`（逐个核对 `@deepseek-ai/dsh-tools`、`dsh-subagent`、`dsh-token-meter`、`dsh-compaction-basic`、`dsh-llm`、`dsh-experimental-agent-team`、`dsh-experimental-tool-agent-team`、`dsh-system-prompt` 的 `package.json` `version` 均为 `0.2.0-rc.2`）。本文档的所有内核坐标都取自该版本。
 - **不 import 任何 `@deepseek-ai/*` 包：** profile 插件位于 `app.asar` 之外，从 profile 目录 import harness 包会以 `ERR_MODULE_NOT_FOUND` 失败（每个随包发布的 profile 插件都是自带依赖或完全不依赖）。因此本插件只 import Node 内建模块，能力全部经 `ctx.get()` 拿服务（`agentTeams`、`subagents`、`tokenMeter`、`compaction`、`sessions`、`sessionPersistence`、`llm`、`webServer` 都是惰性获取，缺了就降级而不是崩），工具定义按 `tools.register()` 接受的 JSON Schema 子集手写，注册契约要求 `output { schema, render }` 也手写满足。
 - **声明的必需服务：** `inject = ["agents", "tools", "systemPrompt"]`；其余服务全是可选。`agentTeams` 缺席时，插件仍装载，只有顶层 root 会被当作 workplace，容量/roster/team 消息相关能力报告为不可用。
@@ -621,7 +634,7 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 8. **两个守卫都是进程内包装。** 结算守卫按 Activation 对象身份去重（`WeakSet`），删除守卫按侧车墓碑判定；都不覆盖跨进程，重启即恢复内核原样。关闭方式：`dedupeSettlementNotices: false` / `blockDeletedTargets: false`。
 9. **守卫状态必须看 `active`。** `team_overview.guard.settlementDedupe` / `blockDeletedTargets` 只在对应 status 为 `active` 时才为 true；`pending` 表示服务还没绑上，`unsupported` 表示找不到 `subagents.continuations?.activations`（说明内核版本变了）。
 10. **`rename` / `reassign` 只改编排层。** 内核 durable name 与 `provider`/`context` 都是不可变身份字段（`projection.js:196-201`），所以改名不会改变内核视图；旧名字通过 `formerNames` 继续可寻址。
-11. **工具只在 Team 成员的 agent scope 注册。** 非成员 agent 看不到六个工具；成员身份不足以判定时（降级模式）只有顶层 root 会被当作 workplace。
+11. **工具只在 Team 成员的 agent scope 注册。** 非成员 agent 看不到九个工具；成员身份不足以判定时（降级模式）只有顶层 root 会被当作 workplace。
 
 ## 任务板与自动分配
 
@@ -715,14 +728,14 @@ pnpm 会把这条 `file:` 规格原样写进 profile 的 `package.json`，于是
 发布之后换成版本规格即可摆脱本地路径：
 
 ```bash
-dsh plugin --profile desktop add dsh-team-conductor@0.5.0
+dsh plugin --profile desktop add dsh-team-conductor@0.6.0
 ```
 
 也可以不发布，直接用 GitHub 或本地 tarball 安装：
 
 ```bash
 dsh plugin --profile desktop add github:LittleAlety/dsh-team-conductor
-dsh plugin --profile desktop add "file:C:/path/to/dsh-team-conductor-0.5.0.tgz"
+dsh plugin --profile desktop add "file:C:/path/to/dsh-team-conductor-0.6.0.tgz"
 ```
 
 > 用 `file:` 安装时，**改代码不会自动生效**：pnpm 复制的是快照，升级要重新 `add` 或直接覆盖 `node_modules/dsh-team-conductor/lib/*.js`（同一路径重复 `add` 是空操作，pnpm 会报 `added 0`）。

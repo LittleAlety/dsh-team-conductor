@@ -1557,7 +1557,77 @@ await check("legacy kernel tool names forward to this plugin", async () => {
   assert.equal(kernelTools.some((tool) => tool.name === "spawn_teammate"), false, "kernel engine must not alias");
 });
 
+await check("reassign hands over our own task board, and retire releases the activation", async () => {
+  // Both used to depend on the kernel service: reassign skipped the hand-over
+  // ("task board unavailable") and retire only set a flag, so a conductor member
+  // kept running after being retired.
+  const spawned = [];
+  const drained = [];
+  const interrupted = [];
+  const lead = makeAgent("life-lead");
+  const services = {
+    agents: { list: () => [lead], get: () => lead },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    subagents: {
+      async startContinuable(spec) {
+        spawned.push(spec);
+        return { childId: `life-child-${spawned.length}`, messageId: "m" };
+      },
+      async drainContinuableChildren(_parent, ids) {
+        drained.push(...ids);
+      },
+      interrupt(target, authority) {
+        interrupted.push({ target, authority });
+      },
+      async sendMessage() {
+        return "m";
+      }
+    }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => {
+      factory();
+      return () => {};
+    },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, { delegationEngine: "conductor" });
+  const call = async (name, args) => {
+    const raw = await lead.__registered.get(name).execute(args, { agent: lead });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+
+  await call("team_member_add", { name: "alpha", brief: "start" });
+  await call("team_task_add", { title: "work to hand over" });
+
+  const handed = await call("team_member_edit", {
+    target: "alpha",
+    action: "reassign",
+    value: "beta",
+    message: "take the next piece",
+    task_id: "t1"
+  });
+  assert.equal(handed.taskHandover.ok, true, `the hand-over must succeed on our own board (${JSON.stringify(handed.taskHandover)})`);
+  const board = await call("team_task_list", {});
+  const task = board.tasks.find((entry) => entry.id === "t1");
+  assert.equal(task.owner, "beta", "the task must be owned by the new name");
+  assert.ok(handed.effects.some((effect) => effect.includes("conductor board")), "the effect must say which board it used");
+
+  const retired = await call("team_member_edit", { target: "beta", action: "retire" });
+  assert.ok(retired.effects.some((effect) => effect.includes("retired")), "retire must report itself");
+  assert.ok(drained.length >= 1, "retire must release the live activation through the subagent seam");
+  assert.equal(interrupted.length >= 1, true, "retire must interrupt a running turn");
+
+  // restore is still available and clears the flag without needing the session back
+  const restored = await call("team_member_edit", { target: "beta", action: "restore" });
+  assert.ok(Array.isArray(restored.effects), "restore must answer with effects");
+});
+
 await check("new agents get the tools installed", () => {
+
 
 
   const created = listeners.find((listener) => listener.event === "agent/created");
