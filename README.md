@@ -37,7 +37,22 @@ GUI 的工具卡片是按**工具名**查 `tool.call.toolview` 插槽决定的�
 | `team_member_add` | 新成员与状态 + 生效项 |
 | `team_member_delete` | 删除对象、内核记录处置（`immutable-active` 等）、名额变化、warnings |
 
-**加载自证：** 客户端半边 apply 时会 `POST /dsh-team-conductor/client-hello`（回环限定），宿主把它记进 `state.clientHalf`，于是状态路由多一个 `clientHalf` 字段（`absent` 或报到时间戳）。这样"客户端有没有真的加载"可以**用 curl 验证**，不必看屏幕。
+**加载自证：** 客户端半边 apply 时会 `POST /dsh-team-conductor/client-hello`（回环限定），宿主把它记进 `state.clientHalf`，于是状态路由多出两个字段：`clientHalf`（`absent` 或报到时间戳）与 **`clientDiag`**（每个贡献阶段的 `"ok"` / `"error: …"`）。这样"客户端有没有真的加载、哪一步被静默拒绝"都**可以用 curl 验证**，不必看屏幕。`clientDiag` 里出现过两种典型失败：`sidebarRightTabs unavailable`（服务晚绑定、`apply` 时取不到）与 `slot "sidebar.right.pane.tab" is not declared`（直接 `slots.register` 而没有先 `slots.inject` 声明贡献）。
+
+### 设置里的「Agent Team」面板
+
+花名册面板注册在**设置**里，而不是右侧栏 tab：设置是"调整插件"的地方，正是用户去找它的位置；而且 `settings.section` 是**静态声明**的插槽，不需要等 `sidebarRight`/`sidebarRightTabs` 这些晚绑定的服务，也就不会踩上面那个坑。
+
+```js
+ctx.slots.inject("settings.section", () => ctx.slots.register({
+  name: "settings.section",
+  id: "agent-team",
+  order: 16,
+  label: () => "Agent Team"   // 注意：这个插槽的 label 是函数，不是字符串
+}, TeamPanel));
+```
+
+面板内容来自 `GET /dsh-team-conductor/team`（每 5 秒轮询）：标题是 `Agent Team · 已用/上限`，每个成员一行（显示名 · `availability` 配色 · 模型）+ 一行职责。打开路径：**设置 → Agent Team**。
 
 **注意：** 新增/修改客户端半边需要**重启宿主**（客户端模块在组合期登记），之后按 F5 刷新页面；这与宿主半边"改代码必须重启"是同一类约束。
 
