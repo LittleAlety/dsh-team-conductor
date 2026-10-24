@@ -1100,6 +1100,36 @@ await check("the browser half can report that it loaded", async () => {
   assert.equal(rejected.statusCode, 405);
 });
 
+await check("the team snapshot route feeds the sidebar panel", () => {
+  const route = routes.get(T.TEAM_ROUTE);
+  assert.ok(route, "team route must be registered alongside the status route");
+  const res = {
+    statusCode: 0,
+    headers: {},
+    body: "",
+    setHeader(key, value) {
+      this.headers[key] = value;
+    },
+    end(payload) {
+      this.body = payload;
+    }
+  };
+  route.handler({ method: "GET", headers: {} }, res);
+  assert.equal(res.statusCode, 200);
+  const payload = JSON.parse(res.body);
+  assert.equal(payload.ok, true);
+  assert.equal(typeof payload.version, "string");
+  assert.ok(payload.capacity.used >= 1, `expected at least one teammate, got ${payload.capacity.used}`);
+  assert.equal(payload.capacity.max, payload.capacity.used + payload.capacity.free);
+  assert.ok(Array.isArray(payload.members) && payload.members.length >= 2);
+  const member = payload.members.find((entry) => entry.role === "teammate");
+  assert.equal(member.availability, "idle-ready", "an inactive, unretired member is reusable");
+  assert.equal(member.displayName, member.alias ?? member.target);
+  const rejected = { statusCode: 0, headers: {}, setHeader() {}, end() {} };
+  route.handler({ method: "POST", headers: {} }, rejected);
+  assert.equal(rejected.statusCode, 405);
+});
+
 await check("new agents get the tools installed", () => {
   const created = listeners.find((listener) => listener.event === "agent/created");
   assert.ok(created, "agent/created listener was not registered");
