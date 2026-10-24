@@ -1119,12 +1119,35 @@ await check("the team snapshot route feeds the sidebar panel", () => {
   const payload = JSON.parse(res.body);
   assert.equal(payload.ok, true);
   assert.equal(typeof payload.version, "string");
-  assert.ok(payload.capacity.used >= 1, `expected at least one teammate, got ${payload.capacity.used}`);
-  assert.equal(payload.capacity.max, payload.capacity.used + payload.capacity.free);
-  assert.ok(Array.isArray(payload.members) && payload.members.length >= 2);
-  const member = payload.members.find((entry) => entry.role === "teammate");
+  // Every live Team is returned, so the panel works from any session — a panel
+  // pinned to "the first Lead" was wrong whenever another session was open.
+  assert.ok(Array.isArray(payload.teams) && payload.teams.length >= 1);
+  assert.equal(payload.selected.root, payload.teams[0].root);
+  assert.equal(payload.sessionId, null);
+  const team = payload.teams[0];
+  assert.equal(team.ok, true);
+  assert.ok(team.capacity.used >= 1, `expected at least one teammate, got ${team.capacity.used}`);
+  assert.equal(team.capacity.max, team.capacity.used + team.capacity.free);
+  assert.ok(Array.isArray(team.members) && team.members.length >= 2);
+  const member = team.members.find((entry) => entry.role === "teammate");
   assert.equal(member.availability, "idle-ready", "an inactive, unretired member is reusable");
   assert.equal(member.displayName, member.alias ?? member.target);
+
+  // ?session= narrows to one team
+  const scoped = { statusCode: 0, headers: {}, body: "", setHeader() {}, end(value) { this.body = value; } };
+  route.handler({ method: "GET", headers: {}, url: `${T.TEAM_ROUTE}?session=${team.root}` }, scoped);
+  const scopedPayload = JSON.parse(scoped.body);
+  assert.equal(scopedPayload.teams.length, 1);
+  assert.equal(scopedPayload.sessionId, team.root);
+  assert.equal(scopedPayload.mismatch, false);
+
+  // An unknown session must not silently fall back to a different team.
+  const missing = { statusCode: 0, headers: {}, body: "", setHeader() {}, end(value) { this.body = value; } };
+  route.handler({ method: "GET", headers: {}, url: `${T.TEAM_ROUTE}?session=session-00000000-0000-0000-0000-000000000000` }, missing);
+  const missingPayload = JSON.parse(missing.body);
+  assert.equal(missingPayload.teams.length, 0);
+  assert.equal(missingPayload.mismatch, true);
+
   const rejected = { statusCode: 0, headers: {}, setHeader() {}, end() {} };
   route.handler({ method: "POST", headers: {} }, rejected);
   assert.equal(rejected.statusCode, 405);

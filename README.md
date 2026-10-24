@@ -52,7 +52,16 @@ ctx.slots.inject("settings.section", () => ctx.slots.register({
 }, TeamPanel));
 ```
 
-面板内容来自 `GET /dsh-team-conductor/team`（每 5 秒轮询）：标题是 `Agent Team · 已用/上限`，每个成员一行（显示名 · `availability` 配色 · 模型）+ 一行职责。打开路径：**设置 → Agent Team**。
+面板内容来自 `GET /dsh-team-conductor/team`（每 5 秒轮询）。**团队是按 root 会话隔离的**（roster 在内核里以 root agent 为键，侧车文件也是 `<rootSessionId>.json`），所以这个路由：
+
+- 不带参数时返回**所有活跃团队** `{ ok, teams: [...], selected, sessionId, mismatch }`；
+- 带 `?session=<rootSessionId>` 时只返回该会话那一个团队，**匹配不到就给空并置 `mismatch: true`**，绝不静默换一个团队给你看。
+
+浏览器半边会尽力定位"当前会话"（先看 URL 里的 UUID，再在持久化 store `dsh.sessions.current` 的值里搜一个 UUID），定位到就直接显示它的团队；同时只要有**多个**活跃团队就渲染一排选择器（`根会话前 8 位 · 已用名额`），所以任何一个有活跃团队的会话都够得着。
+
+> 能力边界：**团队只在它的 Lead 会话存活时存在**。会话关闭、Lead 被释放后，内核里就没有这支队伍了，面板会显示「无活跃团队」——这不是面板的缺陷。
+
+打开路径：**设置 → Agent Team**。
 
 **注意：** 新增/修改客户端半边需要**重启宿主**（客户端模块在组合期登记），之后按 F5 刷新页面；这与宿主半边"改代码必须重启"是同一类约束。
 
