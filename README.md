@@ -2,7 +2,7 @@
 
 **一句话定位：** DeepSeek Harness Agent Teams 的统一控制面——一次看清 roster 与每个成员的上下文压力、就地增删与编辑成员、运行时调整成员上限，并把消息送达到按名字寻址不了的非 roster 子代理。
 
-**它叠加，而不是替换内核 team 工具。** 插件只新增六个工具（`team_overview` / `team_member_edit` / `team_capacity_set` / `team_message` / `team_member_add` / `team_member_delete`）、注入一段 prompt 段、安装一个结算通知守卫。它不注册同名工具去覆盖内核，也不 `disabled: true` 任何内核行：内核的 `spawn_teammate`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`、`team_task_create/list/get/update` 以及 profile 的每一行都原样保留、照常工作。
+**它叠加，而不是替换内核 team 工具。** 插件只新增六个工具（`team_overview` / `team_member_edit` / `team_capacity_set` / `team_message` / `team_member_add` / `team_member_delete`）、注入一段 prompt 段、安装两个包装型守卫（结算通知去重、已删成员消息拦截）。它不注册同名工具去覆盖内核，也不 `disabled: true` 任何内核行：内核的 `spawn_teammate`、`send_message`、`list_agents`、`wait_agent`、`interrupt_agent`、`team_task_create/list/get/update` 以及 profile 的每一行都原样保留、照常工作。
 
 ---
 
@@ -127,39 +127,49 @@ dsh plugin --profile desktop add "file:C:/Users/Little Alety/Documents/deepseek-
 
 ### 2. `team_member_edit`
 
-编辑一个成员：别名、职责、优先级、标签、token 预算、re-brief、retire/restore、compact、interrupt。`retire` / `restore` 是 Lead-only。
+编辑一个成员：别名、改名、职责、优先级、标签、token 预算、re-brief、**reassign（改名接手下一段共享任务）**、retire/restore、compact、interrupt。`retire` / `restore` / `rename` / `reassign` 是 Lead-only；`compact` / `interrupt` 对**自己**放行、对别人 Lead-only。
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `target` | string | **是** | teammate durable name、teammate alias，或 child session id。 |
-| `action` | string | **是** | `alias` / `describe` / `priority` / `tags` / `budget` / `rebrief` / `retire` / `restore` / `compact` / `interrupt`。 |
-| `value` | string | 条件 | 新 alias 或新职责文本（`action=alias` / `action=describe`）。alias 截到 64 字符，description 截到 2000 字符。 |
-| `message` | string | 条件 | 自包含的 re-brief 文本（`action=rebrief`）。 |
+| `target` | string | **是** | teammate durable name、conductor 别名、历史名，或 child session id。 |
+| `action` | string | **是** | `alias` / `rename` / `describe` / `priority` / `tags` / `budget` / `rebrief` / `reassign` / `retire` / `restore` / `compact` / `interrupt`。 |
+| `value` | string | 条件 | 新别名或新编排层名字（`alias` / `rename` / `reassign`），或新职责文本（`describe`）。名字截到 64 字符，description 截到 2000 字符。 |
+| `message` | string | 条件 | 自包含简报（`rebrief` / `reassign`）。 |
 | `tags` | string[] | 条件 | **整体替换**标签表（`action=tags`）；最多 32 个，每个截到 64 字符。 |
 | `priority` | integer | 条件 | 越大越先跑（`action=priority`）。必须是整数。 |
 | `token_budget` | integer | 条件 | 每成员上下文预算（tokens）；`0` 清除它（`action=budget`）。 |
+| `task_id` | string | 否 | 要交接的共享任务（`action=reassign`）；先把该任务 reassign 给这个成员，再发简报。 |
+| `compact_first` | boolean | 否 | `action=reassign` 时先压缩该成员上下文。默认 `false`。 |
 
 ```json
 { "target": "reviewer", "action": "alias", "value": "rev" }
 { "target": "rev", "action": "budget", "token_budget": 160000 }
 { "target": "rev", "action": "rebrief", "message": "新的自包含任务：复核 work/x 的 diff 并给出结论。" }
 { "target": "rev", "action": "retire" }
+{ "target": "rev", "action": "rename", "value": "diff-reviewer" }
+{ "target": "diff-reviewer", "action": "reassign", "value": "docs-checker",
+  "task_id": "task-7", "compact_first": true,
+  "message": "Next task: verify docs/ISSUES.md against lib/index.js." }
 ```
+
+**任务流转（推荐做法）**：一个成员干完当前任务后，**不要**为下一段任务新建成员（内核名字永不复用、名额还占着）。先 `team_task_list` 找到下一段可领的共享任务，再用 `reassign` 一次完成「改名 + 把共享任务 reassign 给它 + 派新简报 + 清掉 retired + 用简报首行更新职责描述」。`team_overview` 会把空闲成员标成 `availability: "idle-ready"` 并在 `diagnostics` 里提示可复用。
 
 逐 action 的准确行为：
 
 | action | 做什么 | 边界 |
 |---|---|---|
 | `alias` | 写侧车 `members[<name>].alias`，此后 `target` 可用别名寻址 | 别名只在本插件的侧车与工具里有效，内核 `list_agents` 看不到 |
+| `rename` | Lead-only；写新 `alias`，把旧名压进 `formerNames`，此后**新旧名字都能寻址** | 内核 durable name 不可改（投影拒绝 `prior.name !== member.name`，`lib/types/projection.js:196-201`）；改名只发生在编排层。会拒绝与其它成员 durable name / 别名 / 历史名撞车 |
 | `describe` | 写侧车 `description`（不改内核 roster 的 `description`） | 同上 |
 | `priority` | 写侧车 `priority` | 纯记录值；内核不据此调度 |
 | `tags` | 写侧车 `tags`（整体替换） | 同上 |
 | `budget` | 写侧车 `tokenBudget`；`0` 清除 | 影响 `team_overview` 的饱和判定，不改内核任何行为 |
 | `rebrief` | 经 team 通道给该成员投递一条 `message`，并在侧车记一条 note | 非 roster 的 child 目标走 subagent 通道 |
+| `reassign` | Lead-only；改名（若给了 `value`）+ 用 `task_id` 把共享任务 reassign 给该成员（读 `getTask` 拿 revision，再 `updateTask(action="reassign")`）+ 派新简报 + 清 `retired` + 用简报首行更新 `description` + 记 note | 任务交接失败只回 warning（任务板不可用 / revision 过期 / 任务不可 reassign）；`compact_first` 对未加载成员或服务缺失也只回 warning |
 | `retire` | Lead-only；成员正在跑就先 `interrupt`，再 `roster.stopTeammates(root,[id])`（15s 超时）释放运行激活，最后写 `retired: true` + `retiredAt` | **可逆的软下线**：roster 行不会删除，名额继续被占用；`stopTeammates` 不可用时只写标记并回 warning |
 | `restore` | Lead-only；把 `retired` 翻回 false | 下一条消息会 cold-resume 该成员 |
-| `compact` | 对已加载成员调 `compaction.compactNow(live, signal, "dsh-team-conductor:manual")`，并在前后各测一次上下文，回报 tokens 变化 | 未加载成员只给 warning（要求先 `rebrief`）；`compactNow` 返回 `null` 表示「没有安全且有用的压缩区间」；服务在两个作用域都取不到时回 warning |
-| `interrupt` | 调内核 `service.interrupt(caller, name)`，回报原状态 | 需要 roster teammate；内核自身强制 Lead-only |
+| `compact` | 对已加载成员调 `compaction.compactNow(live, signal, "dsh-team-conductor:manual")`，并在前后各测一次上下文，回报 tokens 变化 | 对别人 Lead-only、对自己放行；未加载成员只给 warning（要求先 `rebrief`）；`compactNow` 返回 `null` 表示「没有安全且有用的压缩区间」；服务在两个作用域都取不到时回 warning |
+| `interrupt` | 调内核 `service.interrupt(caller, name)`，回报原状态 | 需要 roster teammate；对别人 Lead-only、对自己放行；内核自身也强制 Lead-only |
 
 返回形状：
 
@@ -263,13 +273,13 @@ dsh plugin --profile desktop add "file:C:/Users/Little Alety/Documents/deepseek-
 
 ### 6. `team_member_delete`
 
-**硬删除一个 teammate，不可逆。** 它做四件事：中断并释放运行激活、在编排层立墓碑、把它在内核 roster 里的记录密封成终态、再把成员上限 +1 让替代者放得下。Lead-only。
+**硬删除一个 teammate，不可逆。** 它做四件事：中断并释放运行激活、在编排层立墓碑、让**任何通道**发给它的消息都被拒绝、再把成员上限 +1 让替代者放得下。Lead-only。
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `target` | string | **是** | teammate durable name 或侧车 alias（非 roster 的 child agent 会被拒：它没有 roster 记录可删）。 |
 | `reason` | string | 否 | 记在墓碑上的原因（截到 200 字符）。 |
-| `seal_kernel` | boolean | 否 | 是否同时密封内核 roster 记录。默认 true。 |
+| `seal_kernel` | boolean | 否 | 是否尝试把内核 roster 记录密封成终态。默认 true；**只有成员仍在 `provisioning` 时才可能成功**（见下）。 |
 | `auto_capacity` | boolean | 否 | 是否把成员上限 +1 让替代者放得下。默认 true。 |
 
 ```json
@@ -279,20 +289,26 @@ dsh plugin --profile desktop add "file:C:/Users/Little Alety/Documents/deepseek-
 返回：
 
 ```json
-{ "deleted": { "target": "reviewer", "id": "...", "seal": "sealed" },
+{ "deleted": { "target": "reviewer", "id": "...", "seal": "immutable-active", "upstreamRecordRemoved": false },
   "capacity": { "before": 9, "after": 10, "applied": true },
   "effects": [ "current turn interrupted", "live activation released", "conductor tombstone written",
-               "upstream roster record: sealed",
+               "upstream roster record: record is active and the upstream projection forbids rewriting it (only provisioning -> active|failed is legal); it stays listed upstream, so the tombstone and the message guard are what make the deletion effective",
                "member ceiling raised 9 → 10 so a replacement fits" ],
   "warnings": [],
-  "note": "irreversible: the roster log cannot forget a record and upstream never reuses a name" }
+  "note": "irreversible and *conductor-level*: ... the ceiling was raised so a replacement fits" }
 ```
 
-`seal` 的取值：`sealed` / `left-as-<phase>`（成员仍在 `provisioning` / `failed`）/ `not-in-roster` / `journal-unavailable` / `failed`。注意：在只允许 `provisioning` 起跳的迁移规则下，`sealed` 对已经 `active` 的成员不可达，此时会得到 `failed`（见「已知限制」第 3 条）。
+`seal` 的取值：`sealed-provisioning`（成员还在 `provisioning`，追加了唯一合法的终态边 `provisioning → failed`）/ `immutable-active`（成员已 `active`，**不会写任何日志**）/ `immutable-failed` / `skipped`（`seal_kernel: false`）/ `not-in-roster` / `journal-unavailable`。
 
-**为什么「删除」要长成这样。** 内核 roster 是**只能追加的持久日志**：名字一旦用过就永不复用（`TEAM_MEMBER_NAME_TAKEN`），而且成员只能经历一次终态迁移——`@deepseek-ai/dsh-experimental-agent-team/lib/index.js:1292-1308` 的投影只允许 `provisioning → active` 或 `provisioning → failed`，`active → failed` 会抛 `teammate "<name>" has an invalid active -> failed transition`。所以「删除」在内核里无法表达成「移除一行」，只能用三件事逼近它的效果：**编排层墓碑 + 内核记录密封 + 自动补 1 个名额**，让「删掉再新建」真的可行。
+**为什么「删除」要长成这样。** 内核 roster 是**只能追加的持久日志**，而且**投影本身**只允许一次迁移：`@deepseek-ai/dsh-experimental-agent-team/lib/types/projection.js:196-203` 对已有记录要求 `prior.phase === "provisioning"` 且新相位非 `provisioning`，同时禁止改 `name` / `provider` / `context`（`changed immutable identity fields`）。所以：
+
+- 已经 `active` 的成员**无法被改写、也无法被移除**；
+- 硬删只能表达成 **编排层墓碑 + 消息拦截 + 自动补 1 个名额**；
+- 对 `provisioning` 成员则可以写合法的 `provisioning → failed`（`TeamRoster.settleProvisioning` 在非 provisioning 时会提前返回，因此不会与我们竞争出非法追加）。
 
 **不可逆语义：** 墓碑写进侧车后，这个名字在所有编排层入口（`team_member_edit` / `team_message` / `team_member_delete` 的 target 解析）都被直接拒绝并提示 `team_member_add`；`team_overview` 会继续把它列在 `members` 里（`deleted: true` / `deletedAt`）并计入 `capacity.used` 与 `capacity.deleted`，因为它仍占着内核的一行。`retire` 才是可逆的软下线。
+
+**消息拦截（`blockDeletedTargets`，默认开启）：** 插件在 `ctx.agentTeams.sendMessage` 上装了一层包装，对墓碑成员的投递直接抛 `teammate "<name>" was deleted by dsh-team-conductor (<时间>); the message was not delivered`。这样即使内核 roster 里那行还在、内核工具仍认得这个名字，实际也发不出去。被拦次数在状态路由的 `blockedDeletedSends` 与 `team_overview.guard.blockedDeletedSends` 里可查。
 
 ---
 
@@ -349,12 +365,17 @@ $DSH_HOME/dsh-team-conductor/teams/<rootSessionId>.json
 
 ### 它做什么
 
-`ctx.get("subagents").notifySettlement(activation, terminal)` 是内核把一个 child Activation 的结束通知投递给直接 parent 的入口。插件把服务对象上的这个方法就地替换成一个受 `WeakSet` 保护的包装：
+结算通知的**真实**入口是 `ctx.subagents.continuations.activations.notifySettlement(activation, terminal)`——注意它**不在 `ctx.subagents` 服务对象上**：方法定义在 `ContinuableActivationRegistry`（`@deepseek-ai/dsh-subagent/lib/index.js:1254`，唯一内部调用点 `:1248`），而 `SubagentRuntime.continuations` 是服务字段（`:2826/:2842`），其 `activations` 又是该 manager 的字段（`:1662`）。插件沿 `subagents.continuations?.activations` → `subagents.activations` 找到宿主对象，就地替换成一个受 `WeakSet` 保护的包装：
 
 - 第一次见到某个 **Activation 对象**（引用身份）→ 原样调用 `original.apply(this, [activation, terminal])`。
 - 第二次见到**同一个对象** → 直接返回 `undefined`，并把 `state.stats.suppressedNotices` 加一。
 
 计数会出现在两处：`team_overview` 的 `guard.suppressed` 与 `diagnostics`，以及状态路由的 `suppressedNotices`。
+
+### 两个实现陷阱（都踩过）
+
+1. **包错对象 = 静默失效。** 服务对象上没有 `notifySettlement`，所以包装 `subagents.notifySettlement` 在真实内核上永远 `unsupported`，而 `guard.settlementDedupe` 还显示 `true`——看起来在工作，实际一次都没生效。现在 `guard.settlementDedupe` 只在状态为 `active` 时才为 `true`，并附 `settlementDedupeStatus`。
+2. **`ctx.get()` 返回的是 cordis Proxy。** `Object.defineProperty` 能落到真实实例（没有 trap），但**函数值读回会被 Proxy 再包一层**，所以 `readback !== wrapper` 永远成立 → 误判 `failed`、`state.guard` 不设置、每次工具调用再包一层（泄漏且无法还原）。现在的判据是 `Object.getOwnPropertyDescriptor(owner, name).value === wrapper`，幂等靠包装函数上的 `__dshTeamConductorGuard` 标记属性（Proxy 的 `get` 能读到该属性），完全不依赖引用相等。
 
 ### 为什么只抑制同一个 Activation 的第二次通知
 
@@ -378,11 +399,11 @@ source: { kind: 'subagent-settled', form: 'notice', summary: '<摘要行>', send
 
 | 值 | 含义 |
 |---|---|
-| `active` | 已安装并确认替换生效（替换后回读比对通过，且服务对象仍是同一个）。 |
-| `pending` | `subagents` 服务还没出现；会在上面的三个时机重试。 |
-| `unsupported` | 服务存在，但没有 `notifySettlement` 方法。 |
+| `active` | 已在激活注册表上安装成功（descriptor 判据通过）。 |
+| `pending` | `subagents` 服务还没出现；会在下面的三个时机重试。 |
+| `unsupported` | 服务存在，但 `subagents.continuations?.activations` 与 `subagents.activations` 上都没有 `notifySettlement`。 |
 | `disabled` | 配置 `dedupeSettlementNotices: false`。 |
-| `failed` | 替换后回读比对失败，或替换过程抛错（记一条 warn 日志）。 |
+| `failed` | 替换抛错，或 descriptor 判据不成立（记一条 warn 日志）。 |
 | `removed` | 插件 disposal 后已还原（仅用于内部状态）。 |
 
 插件的 disposal 路径会把方法还原成 `original`——仅当当前值仍是自己的包装时才还原，避免覆盖别人后装的实现。守卫是进程内 `WeakSet`：重启不保留，跨进程也不共享。
@@ -404,11 +425,12 @@ source: { kind: 'subagent-settled', form: 'notice', summary: '<摘要行>', send
 | 键 | 类型 | 默认 | 说明 |
 |---|---|---|---|
 | `dedupeSettlementNotices` | boolean | `true` | 是否安装结算通知守卫；`false` 关闭。 |
+| `blockDeletedTargets` | boolean | `true` | 是否拦截发往墓碑成员的消息（包装 `agentTeams.sendMessage`）。 |
 | `defaultContextWindow` | number | 无 | 路由模型信息不可用时的兜底 context window。 |
 | `maxOverviewNotices` | integer | `10` | `team_overview` 的 `settlements.recent` 保留多少条；被夹到 1–50。 |
 | `freshProvider` | string | `"spawn"` | `team_member_add` 在 `context=fresh` 时用的 subagent provider。 |
 | `forkProvider` | string | `"fork"` | `team_member_add` 在 `context=fork` 时用的 subagent provider。 |
-| `verboseLogging` | boolean | `false` | 当前仅被接受并记录，未在代码中使用（保留项）。 |
+| `verboseLogging` | boolean | `false` | 为 `true` 时每次工具调用打一行 info 日志（工具名、调用者 id、参数前 300 字符）。 |
 
 ---
 
@@ -421,7 +443,7 @@ node tests/smoke.mjs              # 行为套件：逐条打印 PASS/FAIL，有�
 curl -i http://127.0.0.1:19387/dsh-team-conductor/status
 ```
 
-`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务，覆盖：插件导出面、六个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫对同一 Activation 去重、`team_overview` 的测量/容量/账本/子代理过滤、`team_member_edit` 各个 action 与参数拒绝、`team_capacity_set` 的两条路径与 Lead-only 门禁、`team_message` 的两条投递通道、目标解析、饱和梯子、账本分组、侧车往返与按 root 隔离、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过（例如新增工具后断言里的工具数/清单需要同步更新，旧断言会如实 FAIL）。
+`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），覆盖：插件导出面、六个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱）、`team_overview` 的测量/容量/账本/子代理过滤/`availability`、`team_member_edit` 全部 12 个 action 与参数拒绝（含 rename 冲突、reassign 的任务交接）、`team_capacity_set` 的两条路径与 Lead-only 门禁、`team_message` 的两条投递通道、删除后的消息拦截、目标解析（含历史名）、饱和梯子、账本分组、侧车往返与按 root 隔离、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
 
 状态路由（`GET`/`HEAD`，其余方法 405；非回环来源 403）返回：
 
@@ -453,8 +475,8 @@ curl -i http://127.0.0.1:19387/dsh-team-conductor/status
 
 - **现象：** Team 满了以后 `spawn_teammate` 只会返回 `TEAM_MEMBER_LIMIT`；没有任何工具能删掉一个不再需要的成员，于是团队永久卡死。
 - **根因坐标：** 8 不是内核默认值，而是本机 profile 的配置——`@deepseek-ai/dsh-experimental-agent-team-profile/cordis.patch.yml:20` 的 `maxMembers: 8`；内核默认 16（`@deepseek-ai/dsh-experimental-agent-team/lib/types/index.js:15` `DEFAULT_MAX_MEMBERS`）。判定在 `@deepseek-ai/dsh-experimental-agent-team/lib/types/roster.js:241-250` 的 `spawnAdmitted` 事务内（`state.members.length >= this.maxMembers` → `TEAM_MEMBER_LIMIT`），而 `this.maxMembers` 是普通可写字段（同文件 `:41-45`）。内核 roster 的设计就是「扁平且不可变：不支持嵌套 Team、重命名、删除或名字复用」（`@deepseek-ai/dsh-experimental-agent-team/README.zh.md:208`），名字占用判定在 `roster.js:243-245`（`TEAM_MEMBER_NAME_TAKEN`）。可用的释放路径是 `roster.js:218-220` 的 `stopTeammates(root, childIds)` → `ctx.subagents.drainContinuableChildren`；成员能经历的终态迁移只有 `provisioning → active|failed` 一次（`@deepseek-ai/dsh-experimental-agent-team/lib/index.js:1292-1308`）。
-- **本插件处理：** `team_capacity_set` 在运行时直接写 `teamService.roster.maxMembers`（不重新装载、不重启），并拒绝把上限降到已用名额以下；`team_member_add` 满员时自己提额 +1，所以不会再撞 `TEAM_MEMBER_LIMIT`；`team_member_delete` 用「编排层墓碑 + 密封内核记录 + 自动补 1 个名额」表达删除，让「删掉再新建」真的可行；`team_member_edit action=retire` 是可逆软下线：先 interrupt（若在跑）再 `stopTeammates(root,[id])` 释放运行激活，最后写退休标记。
-- **边界与残留风险：** **容量改动只在当前进程生效，重启回到 profile 配的 8。** **内核 roster 日志无法忘记记录**：墓碑与密封都不能把一行从 `state.members` 里拿掉，名字仍不可复用，`used` 仍包含它——补 1 个名额是唯一让替代者进来的办法。密封受内核迁移规则限制：对已经 `active` 的成员，投影拒绝 `active -> failed`，此时 `seal` 返回 `failed` 并回一条 warning，墓碑与补名额不受影响。
+- **本插件处理：** `team_capacity_set` 在运行时直接写 `teamService.roster.maxMembers`（不重新装载、不重启），并拒绝把上限降到已用名额以下；`team_member_add` 满员时自己提额 +1，所以不会再撞 `TEAM_MEMBER_LIMIT`；`team_member_delete` 用「编排层墓碑 + 消息拦截 + 自动补 1 个名额」表达删除，让「删掉再新建」真的可行；**已完成任务的成员还可以 `team_member_edit action=reassign` 改名接手下一段共享任务，连新名额都不用花**；`team_member_edit action=retire` 是可逆软下线：先 interrupt（若在跑）再 `stopTeammates(root,[id])` 释放运行激活，最后写退休标记。
+- **边界与残留风险：** **容量改动只在当前进程生效，重启回到 profile 配的 8。** **内核 roster 日志无法忘记记录**：墓碑不能把一行从 `state.members` 里拿掉，名字仍不可复用，`used` 仍包含它——补 1 个名额是唯一让替代者进来的办法。密封受内核迁移规则限制：只有 `provisioning` 成员能被写成 `failed`；已经 `active` 的成员返回 `immutable-active` 且**不写任何日志**（写就是非法转换，会污染投影），此时只有墓碑、消息拦截与补名额起作用。
 
 ### 3. subagent 与 `spawn_teammate` 的定位差异无文档；subagent 创建后无法被 `send_message` 寻址
 
@@ -467,8 +489,8 @@ curl -i http://127.0.0.1:19387/dsh-team-conductor/status
 
 - **现象：** 同一次子代理结束，parent 会话里出现两条内容相同的结算通知，模型把它当成「又完成了一轮」。
 - **根因坐标：** 通知由 `@deepseek-ai/dsh-subagent/lib/types/continuation-messages.js:85-105` 的 `createSettlementMessage(childId, terminal)` 生成，source 只有 `{kind, form, summary, senderSessionId}`（`:98-103`），**没有 Activation 标识**；投递点是 `@deepseek-ai/dsh-subagent/lib/index.js:1208-1252` 的 `finishDisposal`（`:1248` 调 `notifySettlement`），再由 `:1254-1268` 的 `notifySettlement` 走 `sendWaking`/`inject`。于是「同一 Activation 被通知两次」与「两个不同 Activation 产出相同结尾」在内容上不可区分。
-- **本插件处理：** 结算通知守卫按 **Activation 对象身份**（`WeakSet`）去重：同一个对象第二次被通知时直接抑制并计数；两个不同 Activation 各产一次时**一次不少地放行**，即使正文完全一致。安装是幂等的，并在 `internal/service` 绑定钩子与每次工具调用时重驱动，因此服务晚于插件绑定也能装上。`team_overview` 另外把本会话日志里的通知按 `(child, summary, 正文摘要)` 分组，报告重复次数，供 Lead 与 `guard.suppressed` 对照。
-- **边界与残留风险：** 守卫是进程内 `WeakSet`，不跨进程、不跨重启；它改造的是服务对象上的方法（`Object.defineProperty`，writable/configurable，enumerable false），回读比对失败如实报 `failed`、服务缺席报 `pending`、没有该方法报 `unsupported`，都不静默；两个**不同进程**重复投递同一 Activation、或宿主每次 `get` 返回新包装对象的场景，守卫无法覆盖。上游的正解是给通知 source 加 activation/settlement 标识，或让 `notifySettlement` 自身按 activation 幂等。
+- **本插件处理：** 结算通知守卫按 **Activation 对象身份**（`WeakSet`）去重：同一个对象第二次被通知时直接抑制并计数；两个不同 Activation 各产一次时**一次不少地放行**，即使正文完全一致。守卫装在**真正的宿主对象**上——`subagents.continuations.activations`（激活注册表），而不是 `subagents` 服务本身；安装是幂等的，并在 `internal/service` 绑定钩子与每次工具调用时重驱动，因此服务晚于插件绑定也能装上。`team_overview` 另外把本会话日志里的通知按 `(child, summary, 正文摘要)` 分组，报告重复次数，供 Lead 与 `guard.suppressed` 对照。
+- **边界与残留风险：** 守卫是进程内 `WeakSet`，不跨进程、不跨重启；它改造的是激活注册表上的方法（`Object.defineProperty`，writable/configurable，enumerable false），成功判据是 descriptor 而非引用相等（Proxy 回读会把函数再包一层，用 `!==` 判会永远误判失败）；服务缺席报 `pending`、找不到 `continuations.activations` 报 `unsupported`、descriptor 不成立报 `failed`，都不静默。两个**不同进程**重复投递同一 Activation 的场景守卫无法覆盖。上游的正解是给通知 source 加 activation/settlement 标识，或让 `notifySettlement` 自身按 activation 幂等。
 
 ### 5. `edit` 报「read 状态过期」时缺少可执行的恢复指引，整轮零产出
 
@@ -497,17 +519,17 @@ curl -i http://127.0.0.1:19387/dsh-team-conductor/status
 ## 已知限制
 
 1. **容量改动只在当前进程生效。** `team_capacity_set` 与 add/delete 的自动提额都直接写 `teamService.roster.maxMembers`；重启后回到 profile 配置的值（本机 desktop profile 为 8），侧车里的 `capacity.observedMax` 只作记录。
-2. **内核 roster 行无法真正删除。** `team_member_delete` 是「墓碑 + 密封内核记录 + 补 1 个名额」，行仍在 `state.members` 里、名字仍不可复用、`capacity.used` 仍包含它；`retire` 则是可逆软下线（标记 + 释放运行激活）。更多名额归根结底只有提额一条路。
-3. **密封不是万能的。** 内核只允许 `provisioning → active|failed` 这一次迁移（`@deepseek-ai/dsh-experimental-agent-team/lib/index.js:1292-1308`）；对一个已经 `active` 的成员，`seal_kernel` 会以 `failed` 收场并回一条 warning，此时只有墓碑与补名额起作用。
-4. **侧车信息对内核不可见。** alias/description/priority/tags/budget/retired/deleted 全在侧车；内核 `list_agents` 与 roster 视图看不到它们，其他工具也不认识别名（只有本插件的工具解析别名）。
+2. **内核 roster 行无法真正删除。** `team_member_delete` 是「墓碑 + 消息拦截 + 补 1 个名额」，行仍在 `state.members` 里、名字仍不可复用、`capacity.used` 仍包含它；`retire` 则是可逆软下线（标记 + 释放运行激活）。更多名额归根结底只有提额一条路。**完成任务的成员应优先 `reassign` 复用，而不是删掉再建。**
+3. **密封只在 `provisioning` 时可能。** 内核投影只允许 `provisioning → active|failed` 这一次迁移（`@deepseek-ai/dsh-experimental-agent-team/lib/types/projection.js:196-203`）；对一个已经 `active` 的成员，`seal_kernel` 返回 `immutable-active` 并且**不会写日志**——写下去就是非法转换，会让之后每一次 `journal.state()` 读取都抛错、把整支 Team 的编排面弄坏。此时只有墓碑、消息拦截与补名额起作用。
+4. **侧车信息对内核不可见。** alias/formerNames/description/priority/tags/budget/retired/deleted 全在侧车；内核 `list_agents` 与 roster 视图看不到它们，其他工具也不认识别名（只有本插件的工具解析别名与历史名）。
 5. **测量依赖多个服务。** `tokenMeter`、`llm`、`sessions`、`sessionPersistence` 缺任一，`contextPressure.known` 为 false、级别 `unknown`，只有 `detail` 说明原因——不猜、不估算。
 6. **未加载成员的测量是分离副本。** 用 `sessions.prepare(id, { ..., eventState: "detached" })` 造一个从未进入的副本再测量；读不到或事件数 > 40000 就放弃（`source: unreadable` / `unloaded`）。这个副本只用于测量，不会被驱动执行。
 7. **`compact` 需要成员已加载。** 未加载成员只得到一条 warning（要求先 `rebrief` 唤醒）；`compactNow` 返回 `null` 表示没有安全且有用的压缩区间；`compaction` 服务在两个作用域都取不到时也只回 warning。
-8. **`settlements` 形状不一致。** 调用方没有 live session（读不到日志）时，`team_overview.settlements` 是空数组 `[]` 而不是 `{total, unique, repeats, recent}` 对象。
-9. **`verboseLogging` 未被使用。** 该配置项被接受并归一化，但代码中没有任何读取点（保留项）。
-10. **守卫范围有限。** 进程内 `WeakSet`、按对象身份去重；不覆盖跨进程重复、也不覆盖宿主每次返回新包装对象的场景；关闭方式为 `dedupeSettlementNotices: false`。
+8. **两个守卫都是进程内包装。** 结算守卫按 Activation 对象身份去重（`WeakSet`），删除守卫按侧车墓碑判定；都不覆盖跨进程，重启即恢复内核原样。关闭方式：`dedupeSettlementNotices: false` / `blockDeletedTargets: false`。
+9. **守卫状态必须看 `active`。** `team_overview.guard.settlementDedupe` / `blockDeletedTargets` 只在对应 status 为 `active` 时才为 true；`pending` 表示服务还没绑上，`unsupported` 表示找不到 `subagents.continuations?.activations`（说明内核版本变了）。
+10. **`rename` / `reassign` 只改编排层。** 内核 durable name 与 `provider`/`context` 都是不可变身份字段（`projection.js:196-201`），所以改名不会改变内核视图；旧名字通过 `formerNames` 继续可寻址。
 11. **工具只在 Team 成员的 agent scope 注册。** 非成员 agent 看不到六个工具；成员身份不足以判定时（降级模式）只有顶层 root 会被当作 workplace。
 
 ## English summary
 
-`dsh-team-conductor` is a DeepSeek Harness profile bundle that adds an Agent Teams control plane on top of the kernel team tools. It registers six new tools — `team_overview` (roster plus per-member context pressure, capacity and the settlement-notice ledger), `team_member_edit` (alias/describe/priority/tags/budget/rebrief/retire/restore/compact/interrupt), `team_capacity_set` (runtime member ceiling), `team_message` (deliver by name, alias or child session id), `team_member_add` (create a teammate, raising the ceiling itself when full) and `team_member_delete` (irreversible: tombstone, seal the append-only kernel roster record, and add one slot) — injects a `team:conductor:policy` prompt section at order 640, and installs a settlement-notice guard that suppresses only a second notice for the same Activation object. It imports no `@deepseek-ai/*` package, keeps its own per-root sidecar at `$DSH_HOME/dsh-team-conductor/teams/<rootSessionId>.json`, and exposes a loopback-only status route at `/dsh-team-conductor/status`. Built and verified against kernel `0.2.0-rc.2`; MIT licensed.
+`dsh-team-conductor` is a DeepSeek Harness profile bundle that adds an Agent Teams control plane on top of the kernel team tools. It registers six new tools — `team_overview` (roster plus per-member context pressure, capacity and the settlement-notice ledger), `team_member_edit` (alias/rename/describe/priority/tags/budget/rebrief/reassign/retire/restore/compact/interrupt), `team_capacity_set` (runtime member ceiling), `team_message` (deliver by name, alias, former name or child session id), `team_member_add` (create a teammate, raising the ceiling itself when full) and `team_member_delete` (irreversible: tombstone, block messages to the name, and add one slot) — injects a `team:conductor:policy` prompt section at order 640, and installs two additive guards: a settlement-notice guard on `subagents.continuations.activations.notifySettlement` that suppresses only a second notice for the same Activation object, and a deleted-target guard on `agentTeams.sendMessage`. `reassign` is the recommended flow for reusing a finished member: rename it, hand it the next shared task and brief it in one call. It imports no `@deepseek-ai/*` package, keeps its own per-root sidecar at `$DSH_HOME/dsh-team-conductor/teams/<rootSessionId>.json`, and exposes a loopback-only status route at `/dsh-team-conductor/status`. Built and verified against kernel `0.2.0-rc.2`; MIT licensed.
