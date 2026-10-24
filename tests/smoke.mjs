@@ -1199,6 +1199,20 @@ await check("the console action route dispatches to the real tool", async () => 
   assert.equal(wrongMethod.statusCode, 405);
 });
 
+await check("the injected policy follows the delegation engine", () => {
+  // The model acts on this text, so it must never describe the other engine:
+  // "tombstone + ceiling compensation" is simply false under conductor.
+  const kernel = T.policyText({ delegationEngine: "kernel" });
+  const conductor = T.policyText({ delegationEngine: "conductor" });
+  assert.match(kernel, /当前委派引擎：kernel/);
+  assert.match(conductor, /当前委派引擎：conductor/);
+  assert.match(kernel, /立墓碑/);
+  assert.doesNotMatch(conductor, /立墓碑/);
+  assert.match(conductor, /还给子代理池/);
+  assert.match(conductor, /可立即重建同名成员/);
+  assert.doesNotMatch(kernel, /可立即重建同名成员/);
+});
+
 await check("the conductor engine spawns and drains its own roster", async () => {
   // The whole point of the second engine: members are ordinary continuable
   // subagents, the roster is ours, and removing one returns its slot to the
