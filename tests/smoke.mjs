@@ -1211,6 +1211,13 @@ await check("the injected policy follows the delegation engine", () => {
   assert.match(conductor, /还给子代理池/);
   assert.match(conductor, /可立即重建同名成员/);
   assert.doesNotMatch(kernel, /可立即重建同名成员/);
+  // The model must map "agent team" onto THIS plugin, and must not be pointed at
+  // the kernel tools that no longer exist in this composition.
+  for (const text of [kernel, conductor]) {
+    assert.match(text, /触发词 → 必用本插件/, "the trigger mapping must be present for both engines");
+    assert.match(text, /spawn_teammate/, "the disabled kernel tools must be named so the model stops looking for them");
+    assert.match(text, /team_overview/, "the correct first call must be named");
+  }
 });
 
 await check("the conductor engine spawns and drains its own roster", async () => {
