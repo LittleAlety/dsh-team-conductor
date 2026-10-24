@@ -1199,6 +1199,68 @@ await check("the console action route dispatches to the real tool", async () => 
   assert.equal(wrongMethod.statusCode, 405);
 });
 
+await check("the conductor engine spawns and drains its own roster", async () => {
+  // The whole point of the second engine: members are ordinary continuable
+  // subagents, the roster is ours, and removing one returns its slot to the
+  // subagent pool instead of burning a permanent kernel roster entry.
+  const spawned = [];
+  const drained = [];
+  const lead = makeAgent("cond-lead");
+  const services = {
+    agents: { list: () => [lead], get: (id) => (id === "cond-lead" ? lead : undefined) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    subagents: {
+      async startContinuable(spec) {
+        const childId = `child-${spawned.length + 1}`;
+        spawned.push({ spec, childId });
+        return { childId, messageId: `msg-${spawned.length}` };
+      },
+      async drainContinuableChildren(_parent, ids) {
+        drained.push(...ids);
+      }
+    }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => {
+      factory();
+      return () => {};
+    },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, { delegationEngine: "conductor" });
+
+  const valueOf = async (tool, args) => {
+    const result = await tool.execute(args, { agent: lead });
+    return typeof result?.text === "string" ? JSON.parse(result.text) : result;
+  };
+
+  const add = lead.__registered.get("team_member_add");
+  const created = await valueOf(add, { name: "alpha", description: "does things", brief: "start working" });
+  assert.equal(created.engine, "conductor");
+  assert.equal(spawned.length, 1, "the member must be a freshly spawned continuable subagent");
+  assert.equal(spawned[0].spec.provider, "spawn");
+  assert.equal(spawned[0].spec.request.parent, lead, "the Lead must be the delegation parent");
+  assert.equal(spawned[0].spec.request.prompt, "start working");
+  assert.equal(created.member.id, spawned[0].childId, "the child id is the member's durable address");
+
+  const overview = await valueOf(lead.__registered.get("team_overview"), { include_pressure: false });
+  assert.ok(overview.members.some((member) => member.target === "alpha"), "the conductor roster must list it");
+  assert.equal(overview.team.capacity.used, 1);
+
+  const removed = await valueOf(lead.__registered.get("team_member_delete"), { target: "alpha" });
+  assert.equal(removed.deleted.engine, "conductor");
+  assert.deepEqual(drained, ["child-1"], "deleting must drain the child so the pool slot returns");
+  assert.equal(removed.capacity, null, "no ceiling compensation is needed in this engine");
+
+  // The name is free again — impossible with the kernel roster.
+  const recreated = await valueOf(add, { name: "alpha", description: "again", brief: "second life" });
+  assert.equal(recreated.member.id, "child-2");
+  assert.equal(spawned.length, 2);
+});
+
 await check("new agents get the tools installed", () => {
   const created = listeners.find((listener) => listener.event === "agent/created");
   assert.ok(created, "agent/created listener was not registered");

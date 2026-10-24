@@ -623,6 +623,39 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 10. **`rename` / `reassign` 只改编排层。** 内核 durable name 与 `provider`/`context` 都是不可变身份字段（`projection.js:196-201`），所以改名不会改变内核视图；旧名字通过 `formerNames` 继续可寻址。
 11. **工具只在 Team 成员的 agent scope 注册。** 非成员 agent 看不到六个工具；成员身份不足以判定时（降级模式）只有顶层 root 会被当作 workplace。
 
+## 两个委派引擎（`delegationEngine`）
+
+插件有两种底层，工具面完全相同，切换只改一个配置：
+
+| | `kernel`（默认） | `conductor` |
+|---|---|---|
+| 成员是什么 | 内核 Agent Teams 的 roster 条目 | 本插件用 `subagents.startContinuable` 起的可续接子代理 |
+| 名册在哪 | 内核 roster（**只增不删**，名字永不复用） | 插件侧车 `teams/<root>.json`（**随便改**） |
+| 删除一个成员 | 立墓碑 + 拦消息 + **上限 +1 补偿**（名额永久被占） | drain 子代理，**名额还给池**；记录归档，**名字可复用** |
+| 容量上限 | `roster.maxMembers`（desktop 8 / 内核 16） | `maxActiveSubagents`（`dsh-subagent` 的配置，默认 8，**会回收**） |
+| 需要内核 Team 包吗 | 需要 | **不需要** |
+
+```yaml
+- id: team-conductor
+  config:
+    delegationEngine: conductor
+```
+
+**为什么这一步值得**：内核 roster 是追加日志，`state.members.length >= maxMembers` 数的是**行数**，而 `stopTeammates` 只停会话不删行——删掉的成员永久占位。conductor 引擎改用 `subagents` 的池：实验验证过，把 `maxActiveSubagents` 设成 1 时第二个创建被拒（`ACTIVATION_LIMIT_REACHED`），drain 之后第三个成功，**名额真的回来了**。
+
+**启用 conductor 时同步关掉内核那层**（否则两套名册打架）：
+
+```yaml
+- id: agent-team
+  disabled: true
+- id: tool-agent-team
+  disabled: true
+- id: ui-agent-team      # 面板用我们自己的页头按钮
+  disabled: true
+```
+
+**注意**：切换引擎后名册从空开始——旧的 kernel 成员不再属于任何团队（它们的会话仍在，但 roster 已关）。用 `team_member_add` 重建即可。
+
 ## English summary
 
 `dsh-team-conductor` is a DeepSeek Harness profile bundle that adds an Agent Teams control plane on top of the kernel team tools. It registers six new tools — `team_overview` (roster plus per-member context pressure, capacity and the settlement-notice ledger), `team_member_edit` (alias/rename/describe/priority/tags/budget/rebrief/reassign/retire/restore/compact/interrupt), `team_capacity_set` (runtime member ceiling), `team_message` (deliver by name, alias, former name or child session id), `team_member_add` (create a teammate, raising the ceiling itself when full) and `team_member_delete` (irreversible: tombstone, block messages to the name, and add one slot) — injects a `team:conductor:policy` prompt section at order 640, and installs two additive guards: a settlement-notice guard on `subagents.continuations.activations.notifySettlement` that suppresses only a second notice for the same Activation object, and a deleted-target guard on `agentTeams.sendMessage`. `reassign` is the recommended flow for reusing a finished member: rename it, hand it the next shared task and brief it in one call. It imports no `@deepseek-ai/*` package, keeps its own per-root sidecar at `$DSH_HOME/dsh-team-conductor/teams/<rootSessionId>.json`, and exposes a loopback-only status route at `/dsh-team-conductor/status`. Built and verified against kernel `0.2.0-rc.2`; MIT licensed.
