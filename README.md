@@ -432,6 +432,23 @@ source: { kind: 'subagent-settled', form: 'notice', summary: '<摘要行>', send
 | `forkProvider` | string | `"fork"` | `team_member_add` 在 `context=fork` 时用的 subagent provider。 |
 | `verboseLogging` | boolean | `false` | 为 `true` 时每次工具调用打一行 info 日志（工具名、调用者 id、参数前 300 字符）。 |
 
+### 覆盖配置（profile patch 层）
+
+配置走 profile 的用户覆盖层即可，不必改 bundle：在 `~/.dsh/profiles/desktop/cordis.patch.yml` 追加
+
+```yaml
+- id: team-conductor
+  name: dsh-team-conductor
+  config:
+    dedupeSettlementNotices: true
+    blockDeletedTargets: true
+    maxOverviewNotices: 12
+```
+
+覆盖层在 bundle 之后应用、`config` 整体替换（同 id 后应用者胜）。**实测：改这个文件会立刻热重组**（`cordis.yml` 里该行的 `config` 马上跟着变——`dsh-hmr` 用 chokidar 监听 profile patch 文件），所以**配置项是热生效的**。
+
+**但插件代码不是。** 同一个 id 的模块 specifier 不变，ESM 缓存就仍然命中首次 import 的那一版——改 `lib/index.js` 后进程会一直服务旧代码，必须重启 Harness。这两件事别混为一谈（实测过：config 已进 `cordis.yml`，状态路由仍自报旧版本）。
+
 ---
 
 ## 验证
