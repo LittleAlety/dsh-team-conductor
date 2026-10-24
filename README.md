@@ -441,7 +441,10 @@ cd work/dsh-team-conductor
 node --check lib/index.js          # 语法/加载面
 node tests/smoke.mjs              # 行为套件：逐条打印 PASS/FAIL，有失败则退出码非 0
 curl -i http://127.0.0.1:19387/dsh-team-conductor/status
+node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一版（重启后跑这个）
 ```
+
+> **改完代码必须重启 Harness。** 宿主插件的模块被 ESM loader 缓存，磁盘上的新代码不会热生效——运行中的进程会一直服务它首次 import 的那一版。`scripts/verify-live.mjs` 就是用来区分「磁盘上是 0.4.1」和「进程里真的是 0.4.1」的：版本号、六个工具、两个守卫状态逐项断言，不一致时退出码非 0 并直接提示重启。
 
 `tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），覆盖：插件导出面、六个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱）、`team_overview` 的测量/容量/账本/子代理过滤/`availability`、`team_member_edit` 全部 12 个 action 与参数拒绝（含 rename 冲突、reassign 的任务交接）、`team_capacity_set` 的两条路径与 Lead-only 门禁、`team_message` 的两条投递通道、删除后的消息拦截、目标解析（含历史名）、饱和梯子、账本分组、侧车往返与按 root 隔离、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
 
