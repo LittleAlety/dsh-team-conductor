@@ -1481,7 +1481,80 @@ await check("the dispatcher hands a ready task to an idle member and rolls back 
   assert.equal(rolled.owner, null);
 });
 
+await check("legacy kernel tool names forward to this plugin", async () => {
+  // Prompts, skills and older docs still say spawn_teammate / send_message /
+  // team_task_create. Registering those names as aliases means such a reference
+  // lands here instead of failing with "unknown tool".
+  const spawned = [];
+  const sent = [];
+  const lead = makeAgent("alias-lead");
+  const services = {
+    agents: { list: () => [lead], get: () => lead },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    subagents: {
+      async startContinuable(spec) {
+        spawned.push(spec);
+        return { childId: `alias-child-${spawned.length}`, messageId: "m" };
+      },
+      async drainContinuableChildren() {},
+      async sendMessage(_sender, id, content) {
+        sent.push({ id, content });
+        return "m";
+      }
+    }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => {
+      factory();
+      return () => {};
+    },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, { delegationEngine: "conductor" });
+  const call = async (name, args) => {
+    const tool = lead.__registered.get(name);
+    assert.ok(tool, `${name} must be registered under the conductor engine`);
+    const raw = await tool.execute(args, { agent: lead });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+
+  // The kernel's spawn_teammate schema, verbatim.
+  const created = await call("spawn_teammate", { name: "legacy", description: "built from old name", prompt: "do the old thing" });
+  assert.equal(created.engine, "conductor");
+  assert.equal(spawned.length, 1);
+  assert.deepEqual(spawned[0].request.prompt, [{ type: "text", text: "do the old thing" }], "prompt must map to brief, as content blocks");
+
+  // send_message -> team_message
+  await call("send_message", { target: "legacy", message: "hello" });
+  assert.equal(sent.length, 1, "send_message must reach the member");
+  assert.match(JSON.stringify(sent[0].content), /hello/);
+
+  // list_agents -> team_overview (no pressure measurement)
+  const listed = await call("list_agents", {});
+  assert.ok(Array.isArray(listed.members), "list_agents must return a roster");
+
+  // team_task_create -> team_task_add with the kernel's argument names
+  const task = await call("team_task_create", { subject: "old style task", description: "d", write_scopes: ["src/x.js"] });
+  assert.equal(task.task.title, "old style task");
+  assert.deepEqual(task.task.files, ["src/x.js"]);
+  assert.equal(task.task.details, "d");
+
+  // wait_agent must not throw; it points at re-reading instead of blocking.
+  const waited = await call("wait_agent", { timeout_ms: 1000 });
+  assert.equal(waited.ok, true);
+  assert.match(waited.note, /team_overview|team_task_list/);
+
+  // Aliases are conductor-only: under the kernel engine those names still belong
+  // to the kernel bundle, so registering them again would collide.
+  const kernelTools = T.buildTools(ctx, { delegationEngine: "kernel", legacyAliases: true }, { stats: {} });
+  assert.equal(kernelTools.some((tool) => tool.name === "spawn_teammate"), false, "kernel engine must not alias");
+});
+
 await check("new agents get the tools installed", () => {
+
 
   const created = listeners.find((listener) => listener.event === "agent/created");
   assert.ok(created, "agent/created listener was not registered");
