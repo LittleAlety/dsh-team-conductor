@@ -596,7 +596,7 @@ await check("team_member_add can refuse to auto-raise", async () => {
 
 await check("team_member_add is Lead-only and validates its arguments", async () => {
   await assert.rejects(() => tool(reviewer, "team_member_add").execute({ name: "x", description: "y", brief: "z" }, { agent: reviewer }), /Lead-only/);
-  await assert.rejects(() => runTool(lead, "team_member_add", { name: "x", description: "y" }), /brief is required/);
+  await assert.rejects(() => runTool(lead, "team_member_add", { name: "x", description: "y" }), /brief must be a non-empty string/);
 });
 
 await check("team_member_delete tombstones, refuses illegal upstream rewrites and frees a slot", async () => {
@@ -1219,11 +1219,18 @@ await check("the conductor engine spawns and drains its own roster", async () =>
   // subagent pool instead of burning a permanent kernel roster entry.
   const spawned = [];
   const drained = [];
+  const selected = [];
   const lead = makeAgent("cond-lead");
   const services = {
     agents: { list: () => [lead], get: (id) => (id === "cond-lead" ? lead : undefined) },
     tools: { register: () => () => {} },
     systemPrompt: { section: () => () => {} },
+    sessionController: {
+      async selectModel(request) {
+        selected.push(request);
+        return request;
+      }
+    },
     subagents: {
       async startContinuable(spec) {
         const childId = `child-${spawned.length + 1}`;
@@ -1257,12 +1264,42 @@ await check("the conductor engine spawns and drains its own roster", async () =>
   assert.equal(spawned.length, 1, "the member must be a freshly spawned continuable subagent");
   assert.equal(spawned[0].spec.provider, "spawn");
   assert.equal(spawned[0].spec.request.parent, lead, "the Lead must be the delegation parent");
-  assert.equal(spawned[0].spec.request.prompt, "start working");
+  // The prompt must be CONTENT BLOCKS: a bare string is spread per character by
+  // the seam, which killed the first live spawn with
+  // "DeepSeek Messages cannot represent user/tool-result content undefined".
+  assert.deepEqual(spawned[0].spec.request.prompt, [{ type: "text", text: "start working" }]);
   assert.equal(created.member.id, spawned[0].childId, "the child id is the member's durable address");
 
   const overview = await valueOf(lead.__registered.get("team_overview"), { include_pressure: false });
   assert.ok(overview.members.some((member) => member.target === "alpha"), "the conductor roster must list it");
   assert.equal(overview.team.capacity.used, 1);
+
+  // Model, both ways: chosen at spawn time (agentOptions) and switched later
+  // through sessionController.selectModel — the same seam the GUI uses.
+  const spawnedWithModel = await valueOf(add, {
+    name: "beta",
+    brief: "start",
+    model: "deepseek-account/deepseek-flash"
+  });
+  assert.deepEqual(
+    spawned[1].spec.request.agentOptions,
+    { provider: "deepseek-account", model: "deepseek-flash" },
+    "a model given at spawn time must reach agentOptions"
+  );
+  assert.equal(spawnedWithModel.engine, "conductor");
+  const switched = await valueOf(lead.__registered.get("team_member_edit"), {
+    target: "alpha",
+    action: "model",
+    value: "deepseek-account/deepseek-v4"
+  });
+  assert.equal(selected.length, 1, "changing a member's model must call the session controller");
+  assert.equal(selected[0].sessionId, "child-1", "it must target the member's own session");
+  assert.equal(selected[0].provider, "deepseek-account");
+  assert.equal(selected[0].model, "deepseek-v4");
+  assert.ok(switched.effects.some((effect) => effect.includes("model switched")), "the switch must be reported");
+  // A bare model name inherits the provider instead of inventing one.
+  await valueOf(add, { name: "gamma", brief: "start", model: "deepseek-flash" });
+  assert.deepEqual(spawned[2].spec.request.agentOptions, { model: "deepseek-flash" });
 
   const removed = await valueOf(lead.__registered.get("team_member_delete"), { target: "alpha" });
   assert.equal(removed.deleted.engine, "conductor");
@@ -1270,9 +1307,10 @@ await check("the conductor engine spawns and drains its own roster", async () =>
   assert.equal(removed.capacity, null, "no ceiling compensation is needed in this engine");
 
   // The name is free again — impossible with the kernel roster.
+  const beforeRecreate = spawned.length;
   const recreated = await valueOf(add, { name: "alpha", description: "again", brief: "second life" });
-  assert.equal(recreated.member.id, "child-2");
-  assert.equal(spawned.length, 2);
+  assert.equal(recreated.member.id, spawned[beforeRecreate].childId, "the reused name must spawn a NEW child");
+  assert.equal(spawned.length, beforeRecreate + 1, "a reused name spawns exactly one new child");
 });
 
 await check("new agents get the tools installed", () => {
