@@ -343,7 +343,7 @@ await check("exports the cordis plugin surface", () => {
 // 2. schema subset, 3. registry contract
 await check("every authored schema stays inside the enforced subset", () => {
   const tools = T.buildTools(ctx, { dedupeSettlementNotices: true, maxOverviewNotices: 10 }, { stats: { suppressedNotices: 0 } });
-  assert.equal(tools.length, 6);
+  assert.equal(tools.length, 9);
   for (const definition of tools) {
     const problems = [...subsetViolations(definition.parameters, `${definition.name}.parameters`), ...subsetViolations(T.TEXT_OUTPUT_SCHEMA, `${definition.name}.output`)];
     assert.deepEqual(problems, [], `${definition.name}: ${problems.join("; ")}`);
@@ -352,7 +352,7 @@ await check("every authored schema stays inside the enforced subset", () => {
 
 await check("every tool satisfies the registry contract", () => {
   for (const agent of [lead, reviewer]) {
-    assert.deepEqual([...agent.__registered.keys()].sort(), ["team_capacity_set", "team_member_add", "team_member_delete", "team_member_edit", "team_message", "team_overview"]);
+    assert.deepEqual([...agent.__registered.keys()].sort(), ["team_capacity_set", "team_member_add", "team_member_delete", "team_member_edit", "team_message", "team_overview", "team_task_add", "team_task_list", "team_task_update"]);
     for (const definition of agent.__registered.values()) {
       assert.equal(typeof definition.description, "string");
       assert.ok(definition.description.length > 40, `${definition.name} needs a real description`);
@@ -999,8 +999,8 @@ await check("every member scope shares one set of tool definitions", () => {
     reviewer.__registered.get("team_overview"),
     "the same definition object must serve every scope (built once, not per member)"
   );
-  assert.equal(lead.__registered.size, 6);
-  assert.equal(reviewer.__registered.size, 6);
+  assert.equal(lead.__registered.size, 9);
+  assert.equal(reviewer.__registered.size, 9);
 });
 
 await check("the status route survives a cold boot where webServer binds late", async () => {
@@ -1065,7 +1065,7 @@ await check("the loopback status route answers", async () => {
   assert.equal(body.statusCode, 200);
   assert.equal(body.payload.ok, true);
   assert.equal(body.payload.plugin, T.PLUGIN_ID);
-  assert.deepEqual(body.payload.tools.slice().sort(), ["team_capacity_set", "team_member_add", "team_member_delete", "team_member_edit", "team_message", "team_overview"]);
+  assert.deepEqual(body.payload.tools.slice().sort(), ["team_capacity_set", "team_member_add", "team_member_delete", "team_member_edit", "team_message", "team_overview", "team_task_add", "team_task_list", "team_task_update"]);
   assert.equal(body.payload.teamService, true);
   assert.equal(body.payload.settlementGuard, "active");
   assert.equal(body.payload.settlementGuardScope, "subagents.continuations.activations");
@@ -1335,12 +1335,152 @@ await check("the conductor engine spawns and drains its own roster", async () =>
   assert.equal(spawned.length, beforeRecreate + 1, "a reused name spawns exactly one new child");
 });
 
+await check("the task board enforces dependencies, revisions and overlap warnings", async () => {
+  const lead = makeAgent("board-lead");
+  const services = {
+    agents: { list: () => [lead], get: () => lead },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    subagents: {
+      async startContinuable() {
+        return { childId: "board-child", messageId: "m" };
+      },
+      async drainContinuableChildren() {},
+      async sendMessage() {
+        return "m";
+      }
+    }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => {
+      factory();
+      return () => {};
+    },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, { delegationEngine: "conductor" });
+  const call = async (name, args) => {
+    const raw = await lead.__registered.get(name).execute(args, { agent: lead });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+
+  const first = await call("team_task_add", { title: "first", files: ["src/a.js"] });
+  assert.equal(first.task.revision, 1);
+  assert.equal(first.task.status, "pending");
+  const second = await call("team_task_add", { title: "second", deps: [first.task.id] });
+
+  // A blocked task cannot be claimed; the error names the blocker.
+  await assert.rejects(
+    () => call("team_task_update", { task_id: second.task.id, action: "claim", expected_revision: second.task.revision }),
+    /blocked by t1/
+  );
+  // Compare-and-set: stale and missing revisions are both refused.
+  await assert.rejects(
+    () => call("team_task_update", { task_id: first.task.id, action: "claim", expected_revision: 99 }),
+    /changed since revision 99/
+  );
+  await assert.rejects(
+    () => call("team_task_update", { task_id: first.task.id, action: "claim" }),
+    /expected_revision is required/
+  );
+
+  const claimed = await call("team_task_update", { task_id: first.task.id, action: "claim", expected_revision: first.task.revision });
+  assert.equal(claimed.task.status, "in_progress");
+  assert.equal(claimed.task.revision, 2, "every mutation bumps the revision");
+
+  // File hints that overlap an in-progress task produce a warning, never a veto.
+  const third = await call("team_task_add", { title: "third", files: ["src/a.js/deep.js"] });
+  const thirdClaimed = await call("team_task_update", { task_id: third.task.id, action: "claim", expected_revision: third.task.revision });
+  assert.equal(thirdClaimed.task.status, "in_progress", "overlap must not block the claim");
+  assert.ok(thirdClaimed.warnings.some((warning) => warning.includes("overlaps")), "overlap must be reported");
+  const board = await call("team_task_list", {});
+  assert.ok(board.warnings.some((warning) => warning.includes("touches files")), "the board must repeat the overlap warning");
+
+  // Completing the dependency unblocks the dependent task.
+  await call("team_task_update", { task_id: first.task.id, action: "complete", expected_revision: claimed.task.revision });
+  const secondClaimed = await call("team_task_update", { task_id: second.task.id, action: "claim", expected_revision: second.task.revision });
+  assert.equal(secondClaimed.task.status, "in_progress");
+
+  // Path overlap is the documented prefix rule.
+  assert.equal(T.pathsOverlap("src/a.js", "src/a.js"), true);
+  assert.equal(T.pathsOverlap("src/a", "src/a/b.js"), true);
+  assert.equal(T.pathsOverlap("src/a.js", "src/b.js"), false);
+});
+
+await check("the dispatcher hands a ready task to an idle member and rolls back a failed wake", async () => {
+  const sent = [];
+  const lead = makeAgent("dispatch-lead");
+  let failSend = false;
+  const services = {
+    agents: { list: () => [lead], get: () => lead },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    subagents: {
+      async startContinuable() {
+        return { childId: "dispatch-child", messageId: "m" };
+      },
+      async drainContinuableChildren() {},
+      async sendMessage(_sender, id, content) {
+        if (failSend) throw new Error("delivery unavailable");
+        sent.push({ id, content });
+        return "m";
+      }
+    }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => {
+      factory();
+      return () => {};
+    },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  const options = { delegationEngine: "conductor", autoAssign: { enabled: true, intervalMs: 15000, maxPerTick: 1 } };
+  mod.apply(ctx, options);
+  const call = async (name, args) => {
+    const raw = await lead.__registered.get(name).execute(args, { agent: lead });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+
+  await call("team_member_add", { name: "worker", brief: "wait for tasks" });
+  await call("team_task_add", { title: "do the thing" });
+
+  const state = { options, stats: {} };
+  const tick = await T.autoAssignTick(ctx, state);
+  assert.equal(tick.assigned, 1, "one task must be handed out");
+  assert.equal(sent.length, 1, "the member must be woken with a brief");
+  assert.match(JSON.stringify(sent[0].content), /shared task t1/, "the brief must name the task");
+  const after = await call("team_task_list", {});
+  const claimed = after.tasks.find((entry) => entry.id === "t1");
+  assert.equal(claimed.owner, "worker");
+  assert.equal(claimed.status, "in_progress");
+  assert.equal(claimed.assignedBy, "auto");
+
+  // A second tick finds nothing: the only task is already owned.
+  const second = await T.autoAssignTick(ctx, state);
+  assert.equal(second.assigned, 0);
+
+  // A failed wake must roll the claim back so the task is not stuck in_progress.
+  const task2 = await call("team_task_add", { title: "second thing" });
+  failSend = true;
+  const third = await T.autoAssignTick(ctx, state);
+  assert.equal(third.assigned, 0, "a failed wake reports no assignment");
+  const board = await call("team_task_list", {});
+  const rolled = board.tasks.find((entry) => entry.id === task2.task.id);
+  assert.equal(rolled.status, "pending", "the claim must be released when the member cannot be woken");
+  assert.equal(rolled.owner, null);
+});
+
 await check("new agents get the tools installed", () => {
+
   const created = listeners.find((listener) => listener.event === "agent/created");
   assert.ok(created, "agent/created listener was not registered");
   const late = makeAgent("late-1", { parent: "lead-1" });
   created.callback({ agent: late });
-  assert.equal(late.__registered.size, 6);
+  assert.equal(late.__registered.size, 9);
   const outsider = makeAgent("outsider-1");
   created.callback({ agent: outsider });
   assert.equal(outsider.__registered.size, 0);

@@ -623,6 +623,42 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 10. **`rename` / `reassign` 只改编排层。** 内核 durable name 与 `provider`/`context` 都是不可变身份字段（`projection.js:196-201`），所以改名不会改变内核视图；旧名字通过 `formerNames` 继续可寻址。
 11. **工具只在 Team 成员的 agent scope 注册。** 非成员 agent 看不到六个工具；成员身份不足以判定时（降级模式）只有顶层 root 会被当作 workplace。
 
+## 任务板与自动分配
+
+内核那套任务板随 Team bundle 一起关掉了，所以这是插件自带的：存在同一个侧车文件里（`tasks` 字段），两种引擎都能用，重启不丢。
+
+| 工具 | 作用 |
+|---|---|
+| `team_task_add` | 建任务：`title` / `details` / `deps`（依赖的任务 id）/ `files`（预计触及的路径）/ `priority` |
+| `team_task_list` | 看板：每个任务的 `status`/`owner`/`ready`/`blockedBy`/`overlaps`/`revision`，外加重叠警告 |
+| `team_task_update` | `claim` / `assign` / `complete` / `release` / `reopen` / `cancel` / `edit` |
+
+**三条硬语义：**
+
+1. **依赖闸门**——`claim` 会拒掉依赖未完成的任务，错误里点名阻塞者（`blocked by t1`）。
+2. **CAS revision**——除 `cancel` 外每个改动都要 `expected_revision`；用旧 revision 会被拒并告诉你当前值。这是防"两个成员基于同一份旧副本互相覆盖"的唯一手段。
+3. **写作用域只警告不阻止**——`files` 命中前缀关系（`src/a` 与 `src/a/b.js`）时，两个 in_progress 任务会互相报重叠；`claim` 不会被拦。
+
+### 自动分配（内核没有这个能力）
+
+```yaml
+- id: team-conductor
+  config:
+    autoAssign:
+      enabled: true      # 默认 false（每次派活都要唤醒成员，花钱）
+      intervalMs: 15000  # 3s..600s
+      maxPerTick: 1      # 1..5
+```
+
+每轮只做这几件事：
+
+- 候选任务：`pending` + 无 owner + 依赖已满足；按 `priority` 降序、再按创建时间升序；
+- **跳过**与任何 in_progress 任务文件重叠的任务（避免两个写手撞同一批文件）；
+- 候选成员：未删除/未退休、且当前不是 `running`（在跑的就是忙）；
+- **先 CAS 认领，再唤醒**：先按 revision 标成 `in_progress`，再给成员发认领简报；**唤醒失败就回滚认领**，不留"挂着 in_progress 但没人知道"的僵尸任务。
+
+每次派发在任务的 `assignedBy` 上留 `auto`，便于区分人工与自动。
+
 ## 两个委派引擎（`delegationEngine`）
 
 插件有两种底层，工具面完全相同，切换只改一个配置：
