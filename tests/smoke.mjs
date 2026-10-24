@@ -814,7 +814,164 @@ await check("the detached replica carries a complete session header", async () =
   }
 });
 
-// 11. status route
+// 11. review follow-ups (P1–P6 + the delete-guard hole + the sidecar cache)
+await check("P1: team_capacity_set keeps config.maxMembers in step with the roster", async () => {
+  const before = teamService.config.maxMembers;
+  const payload = await runTool(lead, "team_capacity_set", { max_members: 12 });
+  assert.equal(payload.after, 12);
+  assert.equal(payload.configured, 12, "the returned `configured` must match the enforced ceiling");
+  assert.equal(teamService.config.maxMembers, 12, "service.config.maxMembers must not keep reporting the startup value");
+  const overview = await runTool(lead, "team_overview", { include_pressure: false });
+  assert.equal(overview.team.capacity.max, 12);
+  assert.equal(overview.team.capacity.configured, 12, "overview must not report a divergent configured ceiling");
+  await runTool(lead, "team_capacity_set", { max_members: before });
+});
+
+await check("P3: `lead` cannot be used as an alias or a renamed name", async () => {
+  await assert.rejects(() => runTool(lead, "team_member_edit", { target: "reviewer", action: "alias", value: "lead" }), /Lead pseudo-row/);
+  await assert.rejects(() => runTool(lead, "team_member_edit", { target: "reviewer", action: "alias", value: "LEAD" }), /Lead pseudo-row/);
+  await assert.rejects(() => runTool(lead, "team_member_edit", { target: "reviewer", action: "rename", value: "lead" }), /Lead pseudo-row/);
+  const after = await runTool(lead, "team_overview", { include_pressure: false });
+  const member = after.members.find((entry) => entry.role === "teammate" && entry.deleted !== true);
+  assert.notEqual(member.alias, "lead");
+});
+
+await check("P4: the settlement guard reinstalls when its owner is replaced", () => {
+  const first = { notifySettlement(activation) { this.inbox = activation; } };
+  const service = { continuations: { activations: first } };
+  const localCtx = { get: (name) => (name === "subagents" ? service : undefined), logger: { warn: () => {} } };
+  const state = { options: { dedupeSettlementNotices: true }, stats: { suppressedNotices: 0 } };
+  assert.equal(T.ensureGuard(localCtx, state), "active");
+  assert.equal(state.guard.owner, first);
+  // a fiber reload hands out a brand-new registry instance
+  const second = { notifySettlement(activation) { this.inbox = activation; } };
+  service.continuations.activations = second;
+  assert.equal(T.ensureGuard(localCtx, state), "active");
+  assert.equal(state.guard.owner, second, "the guard must move to the new owner, not keep reporting active on a dead one");
+  assert.equal(T.isOurWrapper(second.notifySettlement), true);
+});
+
+await check("P4: a service that has not published its registry yet is pending, not unsupported", () => {
+  const service = { continuations: undefined };
+  const localCtx = { get: (name) => (name === "subagents" ? service : undefined), logger: { warn: () => {} } };
+  const state = { options: { dedupeSettlementNotices: true }, stats: { suppressedNotices: 0 } };
+  assert.equal(T.ensureGuard(localCtx, state), "pending");
+  assert.equal(T.ensureGuard(localCtx, { ...state, guard: undefined }), "pending");
+  const real = { continuations: { activations: {} } };
+  assert.equal(T.ensureGuard({ get: (n) => (n === "subagents" ? real : undefined) }, { options: { dedupeSettlementNotices: true }, stats: { suppressedNotices: 0 } }), "unsupported");
+});
+
+await check("P5: the detached replica passes the persisted format version through", async () => {
+  const prepared = [];
+  const savedSessions = services.sessions;
+  const savedPersistence = services.sessionPersistence;
+  services.sessions = {
+    get: () => undefined,
+    prepare: (id, options) => {
+      prepared.push(options.meta);
+      return { seq: 0, eventAt: () => undefined, requestHeader: () => undefined };
+    }
+  };
+  const header = { version: 5, id: "cold-1", createdAt: 1234.5, isSeeded: false };
+  services.sessionPersistence = {
+    open: async () => ({ header, inheritedEventCount: 0, async read() { return { events: [{ type: "turn/start", seq: 0, data: { turn: 1 } }] }; }, async close() {} })
+  };
+  try {
+    await T.measureMember(ctx, { id: "cold-1" }, {}, undefined);
+    assert.equal(prepared[0].version, 5, "a future session-format version must pass through, not be pinned to 4");
+    assert.ok(Number.isSafeInteger(prepared[0].createdAt), "a non-integer createdAt must fall back to a safe integer");
+  } finally {
+    services.sessions = savedSessions;
+    services.sessionPersistence = savedPersistence;
+  }
+});
+
+await check("P6a: withTimeout preserves a real failure instead of resolving it", async () => {
+  await assert.rejects(() => T.withTimeout(Promise.reject(new Error("drain failed")), 1000), /drain failed/);
+  assert.equal(await T.withTimeout(Promise.resolve("ok"), 1000), "ok");
+  await assert.rejects(() => T.withTimeout(new Promise(() => {}), 30), /timed out/);
+});
+
+await check("P6b: a member may be renamed back to its own former name", async () => {
+  const first = await runTool(lead, "team_member_edit", { target: "reviewer", action: "rename", value: "alpha-one" });
+  assert.ok(first.record.formerNames.includes("task-runner") || first.record.formerNames.length > 0);
+  const back = await runTool(lead, "team_member_edit", { target: "reviewer", action: "rename", value: "task-runner" });
+  assert.equal(back.record.alias, "task-runner", "reverting a rename must be allowed (deliberate: rename is reversible)");
+});
+
+await check("P6c: only UUID / session-N shapes are treated as session ids", () => {
+  assert.equal(T.looksLikeSessionId("abcdef0123456789"), false, "a bare hex run must not be mistaken for an id");
+  assert.equal(T.looksLikeSessionId("abcdef01-2345-6789-abcd-ef0123456789"), true);
+  assert.equal(T.looksLikeSessionId("session-42"), true);
+  assert.equal(T.looksLikeSessionId("reviewer"), false);
+});
+
+await check("P6d: reassign reports the task hand-over explicitly", async () => {
+  const ok = await runTool(lead, "team_member_edit", { target: "reviewer", action: "reassign", message: "next: verify docs", task_id: "task-9" });
+  assert.deepEqual(ok.taskHandover, { attempted: true, ok: true, reason: null });
+  const saved = teamService.updateTask;
+  teamService.updateTask = async () => {
+    throw new Error("TEAM_TASK_STALE_REVISION");
+  };
+  try {
+    const bad = await runTool(lead, "team_member_edit", { target: "reviewer", action: "reassign", message: "next: retry", task_id: "task-9" });
+    assert.equal(bad.taskHandover.attempted, true);
+    assert.equal(bad.taskHandover.ok, false, "a failed claim must be visible, not buried in warnings");
+    assert.match(bad.taskHandover.reason, /STALE_REVISION/);
+    assert.ok(bad.effects.some((effect) => effect.includes("brief delivered")), "the brief still goes out");
+  } finally {
+    teamService.updateTask = saved;
+  }
+  const none = await runTool(lead, "team_member_edit", { target: "reviewer", action: "rebrief", message: "no task" });
+  assert.deepEqual(none.taskHandover, { attempted: false, ok: false, reason: null });
+});
+
+await check("the delete guard also covers a deleted member addressed by session id", async () => {
+  // Hole found in review: a deleted member that is still resident used to
+  // resolve through the live-agent shortcut into the unguarded child channel.
+  T.updateMemberRecord("lead-1", "reviewer", (current) => ({ ...current, deleted: true, deletedAt: "now" }));
+  try {
+    const membership = { root: lead, id: "lead-1", role: "lead", name: "lead" };
+    const refusal = T.deletedMemberById(ctx, lead, "rev-1");
+    assert.match(String(refusal), /was deleted/);
+    assert.equal(T.deletedMemberById(ctx, lead, "child-z"), undefined, "a non-roster child has no tombstone");
+    await assert.rejects(() => runTool(lead, "team_message", { target: "rev-1", message: "hi" }), /was deleted/, "addressing by durable id must be refused");
+    // resolving the same id must now go through the roster branch, not the child shortcut
+    assert.throws(() => T.resolveTarget(ctx, lead, membership, rows, "rev-1"), /was deleted/);
+  } finally {
+    T.updateMemberRecord("lead-1", "reviewer", (current) => ({ ...current, deleted: false }));
+  }
+});
+
+await check("the sidecar read cache validates by mtime+size and refreshes on write", () => {
+  const first = T.readStore("lead-1");
+  const second = T.readStore("lead-1");
+  assert.equal(first, second, "an unchanged file must be served from the cache");
+  T.updateMemberRecord("lead-1", "cache-probe", () => ({ alias: "cached" }));
+  const third = T.readStore("lead-1");
+  assert.notEqual(third, second, "a write must invalidate the cached value");
+  assert.equal(third.members["cache-probe"].alias, "cached");
+  // an external edit must also invalidate it (size changes)
+  T.writeStore("lead-1", { ...T.readStore("lead-1"), members: { ...T.readStore("lead-1").members, external: { alias: "outside" } } });
+  assert.equal(T.readStore("lead-1").members.external.alias, "outside");
+});
+
+await check("include_pressure: false skips the O(members) session work", async () => {
+  const prepared = [];
+  const savedSessions = services.sessions;
+  services.sessions = { get: () => undefined, prepare: (id) => { prepared.push(id); throw new Error("must not be called"); } };
+  try {
+    const payload = await runTool(lead, "team_overview", { include_pressure: false, include_settlements: false, include_children: false });
+    const member = payload.members.find((entry) => entry.role === "teammate");
+    assert.equal(member.contextPressure.known, false);
+    assert.equal(member.contextPressure.source, "skipped");
+    assert.deepEqual(prepared, [], "no detached replay may run when pressure is skipped");
+  } finally {
+    services.sessions = savedSessions;
+  }
+});
+
+// 12. status route
 await check("the loopback status route answers", async () => {
   const route = routes.get(T.STATUS_ROUTE);
   assert.ok(route, "status route was not registered");
