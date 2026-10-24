@@ -774,6 +774,46 @@ await check("member editing is scoped per team root", () => {
   rmSync(T.storeFile("other-root"));
 });
 
+await check("the detached replica carries a complete session header", async () => {
+  // Live observation: a partial meta makes Session.fromRestore reject with
+  // "session header version must be 4, got undefined", so the measurement would
+  // silently degrade to unknown for every cold member.
+  const prepared = [];
+  const savedSessions = services.sessions;
+  const savedPersistence = services.sessionPersistence;
+  services.sessions = {
+    get: () => undefined,
+    prepare: (id, options) => {
+      prepared.push({ id, options });
+      const header = options?.meta;
+      assert.equal(header?.version, 4, "restore path validates version");
+      assert.equal(header?.id, id, "restore path validates id");
+      assert.equal(typeof header?.createdAt, "number", "restore path validates createdAt");
+      assert.equal(typeof header?.isSeeded, "boolean", "restore path validates isSeeded");
+      return { seq: 0, eventAt: () => undefined, requestHeader: () => undefined };
+    }
+  };
+  services.sessionPersistence = {
+    open: async () => ({
+      header: { version: 4, id: "cold-1", createdAt: 1700000000000, isSeeded: false, cwd: process.cwd(), parentSession: "lead-1" },
+      inheritedEventCount: 0,
+      async read() {
+        return { events: [{ type: "turn/start", seq: 0, data: { turn: 1 } }] };
+      },
+      async close() {}
+    })
+  };
+  try {
+    const measured = await T.measureMember(ctx, { id: "cold-1" }, {}, undefined);
+    assert.equal(prepared.length, 1, "the detached replica must be prepared once");
+    assert.equal(prepared[0].id, "cold-1");
+    assert.equal(measured.source, "persisted");
+  } finally {
+    services.sessions = savedSessions;
+    services.sessionPersistence = savedPersistence;
+  }
+});
+
 // 11. status route
 await check("the loopback status route answers", async () => {
   const route = routes.get(T.STATUS_ROUTE);
