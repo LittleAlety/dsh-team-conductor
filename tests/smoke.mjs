@@ -971,6 +971,38 @@ await check("include_pressure: false skips the O(members) session work", async (
   }
 });
 
+await check("the ledger scan is cached and recomputed only when the log grows", () => {
+  const calls = { count: 0 };
+  const events = [{ type: "user/message", seq: 0, data: { content: [{ type: "text", text: "x" }], source: { kind: "subagent-settled", form: "notice", summary: "s", senderSessionId: "c" } } }];
+  const session = {
+    seq: 1,
+    eventAt(index) {
+      calls.count += 1;
+      return events[index];
+    }
+  };
+  const first = T.settlementLedger(session, 10);
+  const afterFirst = calls.count;
+  const second = T.settlementLedger(session, 10);
+  assert.deepEqual(second, first);
+  assert.equal(calls.count, afterFirst, "an unchanged seq must not rescan the log");
+  events.push({ type: "user/message", seq: 1, data: { content: [{ type: "text", text: "y" }], source: { kind: "subagent-settled", form: "notice", summary: "s2", senderSessionId: "c" } } });
+  session.seq = 2;
+  const third = T.settlementLedger(session, 10);
+  assert.equal(third.total, 2, "a grown log must be rescanned");
+  assert.ok(calls.count > afterFirst);
+});
+
+await check("every member scope shares one set of tool definitions", () => {
+  assert.equal(
+    lead.__registered.get("team_overview"),
+    reviewer.__registered.get("team_overview"),
+    "the same definition object must serve every scope (built once, not per member)"
+  );
+  assert.equal(lead.__registered.size, 6);
+  assert.equal(reviewer.__registered.size, 6);
+});
+
 // 12. status route
 await check("the loopback status route answers", async () => {
   const route = routes.get(T.STATUS_ROUTE);
