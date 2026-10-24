@@ -486,7 +486,7 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 
 > **改完代码必须重启 Harness。** 宿主插件的模块被 ESM loader 缓存，磁盘上的新代码不会热生效——运行中的进程会一直服务它首次 import 的那一版。`scripts/verify-live.mjs` 就是用来区分「磁盘上是 0.5.0」和「进程里真的是 0.5.0」的：版本号、六个工具、两个守卫状态逐项断言，不一致时退出码非 0 并直接提示重启。
 
-`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），**共 58 项**，覆盖：插件导出面、六个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱与 owner 重校验）、`team_overview` 的测量/容量/账本/子代理过滤/`availability`/`include_pressure` 跳过路径、`team_member_edit` 全部 12 个 action 与参数拒绝（含 rename 冲突与可回退旧名、`lead` 保留名拒绝、reassign 的 `taskHandover` 两种结局）、`team_capacity_set` 的双写与两条拒绝路径、`team_message` 的两条投递通道、删除后按名字与**按 id** 的双重拦截、目标解析（含历史名与 id 形状收紧）、饱和梯子、账本分组、侧车往返/缓存失效/按 root 隔离、detached header 完整性、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
+`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），**共 61 项**，覆盖：插件导出面、六个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱与 owner 重校验）、**冷启动下 `webServer` 晚绑定后状态路由经钩子补注册**、`team_overview` 的测量/容量/账本/子代理过滤/`availability`/`include_pressure` 跳过路径、`team_member_edit` 全部 12 个 action 与参数拒绝（含 rename 冲突与可回退旧名、`lead` 保留名拒绝、reassign 的 `taskHandover` 两种结局）、`team_capacity_set` 的双写与两条拒绝路径、`team_message` 的两条投递通道、删除后按名字与**按 id** 的双重拦截、目标解析（含历史名与 id 形状收紧）、饱和梯子、账本分组与缓存、侧车往返/缓存失效/按 root 隔离、detached header 完整性、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
 
 状态路由（`GET`/`HEAD`，其余方法 405；非回环来源 403）返回：
 
@@ -499,8 +499,11 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
   "settlementGuard": "active", "settlementGuardScope": "subagents.continuations.activations",
   "suppressedNotices": 1,
   "deleteGuard": "active", "deleteGuardScope": "plugin", "blockedDeletedSends": 0,
+  "statusRoute": "active",
   "installFailures": 0, "store": "C:/Users/.../.dsh/dsh-team-conductor/teams" }
 ```
+
+**路由也走"惰性重试"这条梯子**（和两个守卫同一套机制）：`webServer` 在冷启动时可能**晚于本插件绑定**，而 `apply()` 只跑一次——早期实现因此在冷启动后让这个端点永远 404（热重载时反而正常，因为那时 `webServer` 已就位）。现在注册是幂等的，并在 `internal/service` 收到 `webServer` 与每次工具调用时重驱动；`statusRoute` 字段报告它自己的状态（`active` / `pending` / `failed`）。
 
 回环门禁：带 `sec-fetch-site` 时只拒绝 `cross-site`；带 `origin` 时 hostname 必须是 `127.0.0.1` / `localhost` / `[::1]` / `::1`；两个头都没有（例如普通 `curl`）则放行。
 

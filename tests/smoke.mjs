@@ -1003,6 +1003,60 @@ await check("every member scope shares one set of tool definitions", () => {
   assert.equal(reviewer.__registered.size, 6);
 });
 
+await check("the status route survives a cold boot where webServer binds late", async () => {
+  // Production failure this reproduces: at a cold boot the profile mounts this
+  // plugin before `webServer` binds; apply() runs once, so the route never
+  // existed and `/dsh-team-conductor/status` answered 404 while the plugin was
+  // perfectly healthy. It only ever worked under hot reload, where webServer was
+  // already published.
+  const localRoutes = new Map();
+  const localListeners = [];
+  const localAgent = makeAgent("cold-lead");
+  const localServices = {
+    agents: { list: () => [localAgent], get: (id) => (id === "cold-lead" ? localAgent : undefined) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} }
+  };
+  const localCtx = {
+    get: (name) => localServices[name],
+    on: (event, callback) => {
+      localListeners.push({ event, callback });
+      return () => {};
+    },
+    effect: (factory) => {
+      factory();
+      return () => {};
+    },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(localCtx, {});
+  assert.equal(localRoutes.size, 0, "no route can exist before webServer binds");
+  localServices.webServer = {
+    register: (route) => {
+      localRoutes.set(route.path, route);
+      return () => localRoutes.delete(route.path);
+    }
+  };
+  for (const listener of localListeners.filter((entry) => entry.event === "internal/service")) {
+    listener.callback("webServer", localServices.webServer);
+  }
+  assert.equal(localRoutes.has(T.STATUS_ROUTE), true, "the internal/service hook must register the route when webServer appears");
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(key, value) {
+      this.headers[key] = value;
+    },
+    end(payload) {
+      this.body = payload;
+    }
+  };
+  localRoutes.get(T.STATUS_ROUTE).handler({ method: "GET", headers: {} }, res);
+  const payload = JSON.parse(res.body);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.statusRoute, "active", "the route must report itself as active");
+});
+
 // 12. status route
 await check("the loopback status route answers", async () => {
   const route = routes.get(T.STATUS_ROUTE);
