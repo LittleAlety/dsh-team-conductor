@@ -6,10 +6,12 @@
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/index.js",
+    "lib/client.js",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
@@ -17,10 +19,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "scripts": {
-    "test": "node --check lib/index.js && node tests/smoke.mjs"
+    "test": "node --check lib/index.js && node --check lib/client.js && node tests/smoke.mjs"
   },
   "keywords": [
     "dsh",

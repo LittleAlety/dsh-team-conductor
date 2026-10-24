@@ -12,15 +12,34 @@
 dsh-team-conductor/
 ├── README.md            # 本文件
 ├── LICENSE              # MIT
-├── package.json         # 包元数据 + dsh.bundle.patch 指向 cordis.patch.yml
+├── package.json         # 包元数据 + dsh.bundle.patch 指向 cordis.patch.yml + dsh.client
 ├── cordis.patch.yml     # bundle patch：只 insert 一行 team-conductor
-├── lib/index.js         # 插件本体（host half，全部逻辑在这里）
+├── lib/index.js         # 宿主半边（host half，全部逻辑在这里）
+├── lib/client.js        # 浏览器半边（把六个工具渲染成紧凑卡片）
+├── scripts/verify-live.mjs  # 断言运行中的进程确实是这一版
 ├── tests/smoke.mjs      # 自包含 smoke 套件（伪造 cordis ctx 与宿主服务）
 └── docs/
     └── ISSUES.md        # 六个上游问题的坐标对照表（现象/根因/本插件能力/需要上游做的事）
 ```
 
-`package.json` 无任何 `dependencies`；`lib/index.js` 只 import `node:crypto`、`node:os`、`node:path`、`node:fs`（要求 Node ≥ 20）。
+`package.json` 无任何 `dependencies`；`lib/index.js` 只 import `node:crypto`、`node:os`、`node:path`、`node:fs`（要求 Node ≥ 20）。`lib/client.js` 是纯 JS 的浏览器半边，通过 `window.__ModuleLoader__.load()` 注册，不需要构建。
+
+### 浏览器半边：工具卡片
+
+GUI 的工具卡片是按**工具名**查 `tool.call.toolview` 插槽决定的；没有专属渲染时，结果就是一段原始 JSON。`lib/client.js` 为六个工具各注册一个卡片：
+
+| 工具 | 卡片内容 |
+|---|---|
+| `team_overview` | 容量一行（已用/上限/剩余）+ 每个成员一行（`displayName` · `availability` · 压力等级/占比），并列出前 3 条 `diagnostics`（如「空闲可复用」提示） |
+| `team_member_edit` | `action → 成员`，`taskHandover` 成功/失败（失败带原因），随后是 `effects` 与前 3 条 `warnings` |
+| `team_capacity_set` | `上限 before → after` + 占用/剩余/`configured` |
+| `team_message` | `kind → 目标` + 投递通道与状态 |
+| `team_member_add` | 新成员与状态 + 生效项 |
+| `team_member_delete` | 删除对象、内核记录处置（`immutable-active` 等）、名额变化、warnings |
+
+**加载自证：** 客户端半边 apply 时会 `POST /dsh-team-conductor/client-hello`（回环限定），宿主把它记进 `state.clientHalf`，于是状态路由多一个 `clientHalf` 字段（`absent` 或报到时间戳）。这样"客户端有没有真的加载"可以**用 curl 验证**，不必看屏幕。
+
+**注意：** 新增/修改客户端半边需要**重启宿主**（客户端模块在组合期登记），之后按 F5 刷新页面；这与宿主半边"改代码必须重启"是同一类约束。
 
 ---
 
@@ -486,7 +505,7 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 
 > **改完代码必须重启 Harness。** 宿主插件的模块被 ESM loader 缓存，磁盘上的新代码不会热生效——运行中的进程会一直服务它首次 import 的那一版。`scripts/verify-live.mjs` 就是用来区分「磁盘上是 0.5.0」和「进程里真的是 0.5.0」的：版本号、六个工具、两个守卫状态逐项断言，不一致时退出码非 0 并直接提示重启。
 
-`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），**共 61 项**，覆盖：插件导出面、六个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱与 owner 重校验）、**冷启动下 `webServer` 晚绑定后状态路由经钩子补注册**、`team_overview` 的测量/容量/账本/子代理过滤/`availability`/`include_pressure` 跳过路径、`team_member_edit` 全部 12 个 action 与参数拒绝（含 rename 冲突与可回退旧名、`lead` 保留名拒绝、reassign 的 `taskHandover` 两种结局）、`team_capacity_set` 的双写与两条拒绝路径、`team_message` 的两条投递通道、删除后按名字与**按 id** 的双重拦截、目标解析（含历史名与 id 形状收紧）、饱和梯子、账本分组与缓存、侧车往返/缓存失效/按 root 隔离、detached header 完整性、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
+`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），**共 62 项**，覆盖：插件导出面、六个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱与 owner 重校验）、**冷启动下 `webServer` 晚绑定后状态路由经钩子补注册**、`team_overview` 的测量/容量/账本/子代理过滤/`availability`/`include_pressure` 跳过路径、`team_member_edit` 全部 12 个 action 与参数拒绝（含 rename 冲突与可回退旧名、`lead` 保留名拒绝、reassign 的 `taskHandover` 两种结局）、`team_capacity_set` 的双写与两条拒绝路径、`team_message` 的两条投递通道、删除后按名字与**按 id** 的双重拦截、目标解析（含历史名与 id 形状收紧）、饱和梯子、账本分组与缓存、侧车往返/缓存失效/按 root 隔离、detached header 完整性、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
 
 状态路由（`GET`/`HEAD`，其余方法 405；非回环来源 403）返回：
 
@@ -499,7 +518,7 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
   "settlementGuard": "active", "settlementGuardScope": "subagents.continuations.activations",
   "suppressedNotices": 1,
   "deleteGuard": "active", "deleteGuardScope": "plugin", "blockedDeletedSends": 0,
-  "statusRoute": "active",
+  "statusRoute": "active", "clientHalf": "absent",
   "installFailures": 0, "store": "C:/Users/.../.dsh/dsh-team-conductor/teams" }
 ```
 

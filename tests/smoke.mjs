@@ -1074,6 +1074,32 @@ await check("the loopback status route answers", async () => {
   assert.equal(body.payload.deleteGuardScope, "plugin");
 });
 
+await check("the browser half can report that it loaded", async () => {
+  // A client bundle is registered by the host at composition time, so a file on
+  // disk proves nothing about whether the page ever received it. The client half
+  // POSTs to this route once it has applied, and the status route exposes it.
+  const before = await callStatus();
+  assert.equal(before.payload.clientHalf, "absent");
+  const route = routes.get(T.CLIENT_HELLO_ROUTE);
+  assert.ok(route, "client-hello route must be registered alongside the status route");
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(key, value) {
+      this.headers[key] = value;
+    },
+    end() {}
+  };
+  route.handler({ method: "POST", headers: { "user-agent": "smoke" } }, res);
+  assert.equal(res.statusCode, 200);
+  const after = await callStatus();
+  assert.notEqual(after.payload.clientHalf, "absent", "the status route must record the client half's visit");
+  // non-POST is rejected
+  const rejected = { statusCode: 0, headers: {}, setHeader() {}, end() {} };
+  route.handler({ method: "GET", headers: {} }, rejected);
+  assert.equal(rejected.statusCode, 405);
+});
+
 await check("new agents get the tools installed", () => {
   const created = listeners.find((listener) => listener.event === "agent/created");
   assert.ok(created, "agent/created listener was not registered");
