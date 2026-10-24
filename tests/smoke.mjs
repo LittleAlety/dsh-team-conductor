@@ -1220,6 +1220,7 @@ await check("the conductor engine spawns and drains its own roster", async () =>
   const spawned = [];
   const drained = [];
   const selected = [];
+  const interrupted = [];
   const lead = makeAgent("cond-lead");
   const services = {
     agents: { list: () => [lead], get: (id) => (id === "cond-lead" ? lead : undefined) },
@@ -1232,6 +1233,9 @@ await check("the conductor engine spawns and drains its own roster", async () =>
       }
     },
     subagents: {
+      interrupt(target, authority) {
+        interrupted.push({ target, authority });
+      },
       async startContinuable(spec) {
         const childId = `child-${spawned.length + 1}`;
         spawned.push({ spec, childId });
@@ -1300,6 +1304,24 @@ await check("the conductor engine spawns and drains its own roster", async () =>
   // A bare model name inherits the provider instead of inventing one.
   await valueOf(add, { name: "gamma", brief: "start", model: "deepseek-flash" });
   assert.deepEqual(spawned[2].spec.request.agentOptions, { model: "deepseek-flash" });
+
+  // Engine-specific semantics: no kernel ceiling exists here, so capacity_set
+  // explains instead of throwing (throwing would read as "something broke"), and
+  // capacity reporting must not pretend the kernel's 8 applies.
+  const capacityResult = await valueOf(lead.__registered.get("team_capacity_set"), { max_members: 3 });
+  assert.equal(capacityResult.applied, false);
+  assert.equal(capacityResult.engine, "conductor");
+  assert.match(capacityResult.detail, /no member ceiling/);
+  const overviewEngine = await valueOf(lead.__registered.get("team_overview"), { include_pressure: false });
+  assert.equal(overviewEngine.team.capacity.engine, "conductor");
+  assert.equal(overviewEngine.team.capacity.configured, null, "the kernel's configurable ceiling does not apply");
+  assert.notEqual(overviewEngine.team.capacity.max, 8, "the kernel fallback must not be reported as the limit");
+
+  // interrupt goes straight to the subagent seam under this engine.
+  await valueOf(lead.__registered.get("team_member_edit"), { target: "alpha", action: "interrupt" });
+  assert.equal(interrupted.length, 1, "interrupt must reach subagents.interrupt");
+  assert.equal(interrupted[0].target, "child-1");
+  assert.deepEqual(interrupted[0].authority, { kind: "user", parentSessionId: "cond-lead" });
 
   const removed = await valueOf(lead.__registered.get("team_member_delete"), { target: "alpha" });
   assert.equal(removed.deleted.engine, "conductor");
