@@ -47,5 +47,17 @@
     "darwin",
     "linux"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LittleAlety/dsh-team-conductor.git"
+  },
+  "homepage": "https://github.com/LittleAlety/dsh-team-conductor#readme",
+  "bugs": {
+    "url": "https://github.com/LittleAlety/dsh-team-conductor/issues"
+  },
+  "author": "LittleAlety",
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT"
 }

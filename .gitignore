@@ -9,3 +9,6 @@ Thumbs.db
 
 # Verification scratch (kept out of the published tree)
 verify-probe.log
+
+# npm pack output
+*.tgz

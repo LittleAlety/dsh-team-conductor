@@ -692,6 +692,45 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 
 **注意**：切换引擎后名册从空开始——旧的 kernel 成员不再属于任何团队（它们的会话仍在，但 roster 已关）。用 `team_member_add` 重建即可。
 
+## 打包与发布
+
+**能打成 npm 包**：`npm pack` 产出 6 个文件、约 87 kB（`lib/index.js`、`lib/client.js`、`cordis.patch.yml`、`package.json`、`README.md`、`LICENSE`）。`files` 白名单已限制，测试与脚本不进包。
+
+```bash
+npm pack                 # 产出 dsh-team-conductor-<version>.tgz
+npm login                # 需要 npm 账号
+npm publish              # publishConfig.access = public
+```
+
+`exports` 有两个入口：`"."` 是宿主半边，`"./client"` 是浏览器半边（后者只能在 Web 客户端里被 `window.__ModuleLoader__` 加载，Node 里 import 会失败，属正常）。
+
+**为什么 profile 里会看到"你自己的文件夹地址"**：那不是插件内部引用，而是**安装方式**决定的。用本地路径安装时
+
+```bash
+dsh plugin --profile desktop add "file:C:/Users/.../work/dsh-team-conductor"
+```
+
+pnpm 会把这条 `file:` 规格原样写进 profile 的 `package.json`，于是 `dependencies` 里就出现了一个指向工作区的绝对路径。插件代码本身**没有任何硬编码路径**：侧车目录由 `$DSH_HOME`（缺省 `~/.dsh`）解析，其余全部相对当前进程。
+
+发布之后换成版本规格即可摆脱本地路径：
+
+```bash
+dsh plugin --profile desktop add dsh-team-conductor@0.5.0
+```
+
+也可以不发布，直接用 GitHub 或本地 tarball 安装：
+
+```bash
+dsh plugin --profile desktop add github:LittleAlety/dsh-team-conductor
+dsh plugin --profile desktop add "file:C:/path/to/dsh-team-conductor-0.5.0.tgz"
+```
+
+> 用 `file:` 安装时，**改代码不会自动生效**：pnpm 复制的是快照，升级要重新 `add` 或直接覆盖 `node_modules/dsh-team-conductor/lib/*.js`（同一路径重复 `add` 是空操作，pnpm 会报 `added 0`）。
+
 ## English summary
 
-`dsh-team-conductor` is a DeepSeek Harness profile bundle that adds an Agent Teams control plane on top of the kernel team tools. It registers six new tools — `team_overview` (roster plus per-member context pressure, capacity and the settlement-notice ledger), `team_member_edit` (alias/rename/describe/priority/tags/budget/rebrief/reassign/retire/restore/compact/interrupt), `team_capacity_set` (runtime member ceiling), `team_message` (deliver by name, alias, former name or child session id), `team_member_add` (create a teammate, raising the ceiling itself when full) and `team_member_delete` (irreversible: tombstone, block messages to the name, and add one slot) — injects a `team:conductor:policy` prompt section at order 640, and installs two additive guards: a settlement-notice guard on `subagents.continuations.activations.notifySettlement` that suppresses only a second notice for the same Activation object, and a deleted-target guard on `agentTeams.sendMessage`. `reassign` is the recommended flow for reusing a finished member: rename it, hand it the next shared task and brief it in one call. It imports no `@deepseek-ai/*` package, keeps its own per-root sidecar at `$DSH_HOME/dsh-team-conductor/teams/<rootSessionId>.json`, and exposes a loopback-only status route at `/dsh-team-conductor/status`. Built and verified against kernel `0.2.0-rc.2`; MIT licensed.
+`dsh-team-conductor` is a DeepSeek Harness profile bundle that adds an Agent Teams control plane. Nine tools ship: `team_overview` (roster with per-member context pressure, capacity, settlement-notice ledger), `team_member_edit` (alias/rename/describe/priority/tags/budget/model/rebrief/reassign/retire/restore/compact/interrupt), `team_member_add`, `team_member_delete`, `team_capacity_set`, `team_message` (name, alias, former name or child session id), and a sidecar-backed task board — `team_task_add`, `team_task_list`, `team_task_update` with dependencies, compare-and-set revisions and write-scope overlap warnings. An injected `team:conductor:policy` section at order 640 tells the model which layer it is running on and which tools to use.
+
+Two delegation engines share one tool surface (`delegationEngine`): `kernel` drives the upstream Agent Teams roster (append-only: names never reused, a deleted entry keeps its slot, hence the ceiling compensation); `conductor` spawns ordinary continuable subagents and keeps the roster in this plugin's sidecar, so rename/remove are plain edits, a removal returns its slot to the subagent pool, and names are reusable. Under `conductor` the seven legacy kernel tool names (`spawn_teammate`, `send_message`, `list_agents`, `interrupt_agent`, `wait_agent`, `team_task_create`, `team_task_get`) are registered as forwarding aliases, and an optional dispatcher (`autoAssign`) hands ready tasks to idle members — claiming with compare-and-set first and rolling the claim back if the wake-up fails.
+
+It imports no `@deepseek-ai/*` package, keeps a per-root sidecar at `$DSH_HOME/dsh-team-conductor/teams/<rootSessionId>.json`, exposes loopback-only routes (`/status`, `/client-hello`, `/team`, `/action`) and a browser half that renders tool cards, a Settings section and a session-header button. Built and verified against kernel `0.2.0-rc.2`; MIT licensed.
