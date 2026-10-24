@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+
+# Logs / local scratch
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Verification scratch (kept out of the published tree)
+verify-probe.log

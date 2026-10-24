@@ -1,0 +1,8 @@
+# dsh-team-conductor bundle patch.
+#
+# Insert the conductor layer so it mounts next to the Agent Teams bundle it
+# operates on. The row references the package by name, so Node resolution finds
+# lib/index.js through the profile's node_modules.
+- insert:
+    - id: team-conductor
+      name: 'dsh-team-conductor'
