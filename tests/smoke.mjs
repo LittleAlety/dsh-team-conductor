@@ -336,7 +336,11 @@ const callStatus = () => new Promise((resolveBody) => {
 // 1. plugin surface
 await check("exports the cordis plugin surface", () => {
   assert.equal(mod.name, "team-conductor");
-  assert.deepEqual(mod.inject, ["agents", "tools", "systemPrompt"]);
+  // Only `agents` is required: everything is registered through the per-agent
+  // scope, and requiring `tools`/`systemPrompt` silently parked the whole plugin
+  // in a composition that publishes them elsewhere (a headless profile composed
+  // the entity but never ran apply).
+  assert.deepEqual(mod.inject, ["agents"]);
   assert.equal(typeof mod.apply, "function");
 });
 
