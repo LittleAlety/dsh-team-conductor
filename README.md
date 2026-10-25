@@ -729,6 +729,23 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 > 为什么不挂工作区就能隐藏：项目区的会话列表由 `workspace.sessionIds`（挂载关系）驱动，不挂载就不在那一列里。
 > 顺带说明：如果你在会话列表里**手动删除**某个成员的会话，名册记录不会自动消失——它仍会出现在 `team_overview` 里，直到 `team_member_delete` 把记录归档（插件无法可靠得知一个已落盘的会话被删掉了）。
 
+### availability 的每个值都有意思
+
+`team_overview`（和面板徽章）不再用一个 `idle-ready` 含糊覆盖所有"没在跑"的情况：
+
+| 值 | 含义 |
+|---|---|
+| `working` | 正在跑 |
+| `idle-ready` | **空闲且健康**，可以接活 |
+| `awaiting-review` | 刚提交任务、**等 Lead 审议**（不是坏了，但别急着派新活） |
+| `error` | **上一轮失败**：`lastTurn.kind === "error"`，`diagnostics` 里有失败信息与 code |
+| `blocked` | 上一轮被拦下、什么都没执行 |
+| `retired` / `deleted` | 主动下线 / 已移出团队 |
+
+`lastTurn` 是从成员**自己的会话日志**读出来的（`turn/end` 的 `reason.kind`，实测有 `completed` / `error` / `aborted` / `blocked`），所以"任务刚做完"和"上一轮炸了、工具没调用成功"不会再长得一样。面板上失败会直接显示 `失败：<原因>`，红色徽章。
+
+> 已知边界：`lastTurn` 只对**在线**成员读取（面板/工具从 live agent 的 session 取）。成员下线后 `lastTurn` 为 `null`，`availability` 退回 `idle-ready`——此时请结合 `contextPressure` 与会话本身判断。
+
 ### 全队共用一个模型（默认）
 
 `syncMemberModels` 默认 **true**，团队模型是"一份"而不是每人一份：

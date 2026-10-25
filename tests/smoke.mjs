@@ -2197,6 +2197,91 @@ await check("a member's completion notifies the Lead for review; the Lead's own 
   assert.equal(sent.length, 0, "and nothing was delivered through the subagent channel either");
 });
 
+await check("availability tells a failed turn and a pending review apart from plain idle", async () => {
+  // Unit level: the mapping itself.
+  const base = { role: "teammate", status: "inactive", record: {}, hasReview: false };
+  assert.equal(T.availabilityOf({ ...base, lastTurn: null }), "idle-ready");
+  assert.equal(T.availabilityOf({ ...base, lastTurn: { kind: "completed" } }), "idle-ready");
+  assert.equal(T.availabilityOf({ ...base, lastTurn: { kind: "error", error: "boom" } }), "error");
+  assert.equal(T.availabilityOf({ ...base, lastTurn: { kind: "blocked" } }), "blocked");
+  assert.equal(T.availabilityOf({ ...base, hasReview: true }), "awaiting-review");
+  assert.equal(T.availabilityOf({ ...base, status: "running" }), "working");
+  assert.equal(T.availabilityOf({ ...base, record: { retired: true } }), "retired");
+  assert.equal(T.availabilityOf({ ...base, record: { deleted: true } }), "deleted");
+  // A failure outranks a pending review: the member did not actually deliver.
+  assert.equal(T.availabilityOf({ ...base, lastTurn: { kind: "error" }, hasReview: true }), "error");
+
+  // Integration level: team_overview reads the member's own log.
+  const failedEvents = [
+    { type: "turn/start", data: { turn: 1 } },
+    { type: "turn/end", time: 1700000000000, data: { turn: 1, reason: { kind: "error", error: { message: "upstream 429", code: "RATE_LIMIT" } } } }
+  ];
+  const okEvents = [{ type: "turn/end", time: 1700000001000, data: { turn: 1, reason: { kind: "completed" } } }];
+  const lead = makeAgent("avail-lead");
+  const broken = makeAgent("avail-broken");
+  broken.session = makeSession("avail-broken", undefined, failedEvents);
+  const fresh = makeAgent("avail-fresh");
+  fresh.session = makeSession("avail-fresh", undefined, okEvents);
+  const live = [lead, broken, fresh];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    sessionController: {
+      async create() { return { sessionId: "avail-fresh" }; },
+      async prompt() { return { accepted: true }; },
+      async rename() { return { title: "x" }; },
+      cancel() {},
+      async selectModel() { return { provider: "p", model: "m" }; }
+    },
+    workspaceRegistry: { list: () => [] },
+    subagents: { async sendMessage() { return "m"; } }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, { delegationEngine: "session" });
+  const call = async (name, args) => {
+    const raw = await lead.__registered.get(name).execute(args, { agent: lead });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+
+  // Two members: one whose last turn failed, one that finished cleanly.
+  await call("team_member_add", { name: "broken-one", brief: "go" });
+  await call("team_member_add", { name: "fresh-one", brief: "go" });
+  const store = T.readStore(lead.id);
+  T.writeStore(lead.id, {
+    ...store,
+    members: {
+      ...store.members,
+      "broken-one": { ...store.members["broken-one"], childId: "avail-broken" },
+      "fresh-one": { ...store.members["fresh-one"], childId: "avail-fresh" }
+    }
+  });
+
+  const overview = await call("team_overview", {});
+  const brokenRow = overview.members.find((member) => member.target === "broken-one");
+  const freshRow = overview.members.find((member) => member.target === "fresh-one");
+  assert.equal(brokenRow.availability, "error", "a failed last turn is not idle-ready");
+  assert.equal(brokenRow.lastTurn.kind, "error");
+  assert.equal(brokenRow.lastTurn.code, "RATE_LIMIT");
+  assert.equal(brokenRow.diagnostics.some((line) => line.includes("last turn failed")), true, "the failure must be named");
+  assert.equal(freshRow.availability, "idle-ready", "a clean finish is genuinely idle");
+
+  // A member waiting for review is reported separately from a free one.
+  const task = await call("team_task_add", { title: "needs review" });
+  T.mutateTask(lead.id, T.readStore(lead.id), { taskId: task.task.id, action: "claim", expectedRevision: task.task.revision }, "fresh-one");
+  const reviewing = (await call("team_task_list", {})).tasks.find((entry) => entry.id === task.task.id);
+  T.mutateTask(lead.id, T.readStore(lead.id), { taskId: task.task.id, action: "complete", expectedRevision: reviewing.revision, report: "done" }, "fresh-one");
+  const after = await call("team_overview", {});
+  const pending = after.members.find((member) => member.target === "fresh-one");
+  assert.equal(pending.availability, "awaiting-review", "a submitted task is not plain idle");
+  assert.equal(pending.diagnostics.some((line) => line.includes("waiting for the Lead's review")), true);
+});
+
 await check("the team shares one model by default; sync can be turned off", async () => {
   const calls = [];
   const lead = makeAgent("sync-lead");
