@@ -729,6 +729,18 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 > 为什么不挂工作区就能隐藏：项目区的会话列表由 `workspace.sessionIds`（挂载关系）驱动，不挂载就不在那一列里。
 > 顺带说明：如果你在会话列表里**手动删除**某个成员的会话，名册记录不会自动消失——它仍会出现在 `team_overview` 里，直到 `team_member_delete` 把记录归档（插件无法可靠得知一个已落盘的会话被删掉了）。
 
+### 全队共用一个模型（默认）
+
+`syncMemberModels` 默认 **true**，团队模型是"一份"而不是每人一份：
+
+- **新建成员自动继承 Lead 的模型**（`selectModel` 到该会话），所以新成员不会莫名其妙跑在默认模型上；
+- `team_member_edit(action="model", value="provider/model")` 会**把 Lead 和所有成员一起切**——target 写谁都一样，建议写 `lead` 表达"全队"；命令行的等价写法 `team_member_edit(lead, model, provider/model)`；
+- 面板的容量卡片里有一行「**全队模型（同步）**」+「全队切换」按钮，人也能一键切全队；
+- 想回到"逐成员各自模型"就关掉：`syncMemberModels: false`（此时新建成员不继承，`action=model` 只切 target）；
+- 显式 `team_member_add(model=…)` 始终是该成员的**一次性覆盖**，不改变同步设置。
+
+> 注意：底层 `selectModel` 会在后台把这个选择保存为全局默认模型，所以"全队切换"也会影响以后新建的会话——这是 GUI 换模型本身的行为，不是本插件加的。
+
 ### 完成 → 审议的闭环
 
 成员做完任务**不是**自己宣布完成：

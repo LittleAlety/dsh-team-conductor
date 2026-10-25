@@ -2197,6 +2197,65 @@ await check("a member's completion notifies the Lead for review; the Lead's own 
   assert.equal(sent.length, 0, "and nothing was delivered through the subagent channel either");
 });
 
+await check("the team shares one model by default; sync can be turned off", async () => {
+  const calls = [];
+  const lead = makeAgent("sync-lead");
+  lead.options = { provider: "lead-provider", model: "lead-model" };
+  const member = makeAgent("sync-member");
+  const live = [lead, member];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    sessionController: {
+      async create() { return { sessionId: "sync-member" }; },
+      async prompt() { return { accepted: true }; },
+      async rename() { return { title: "x" }; },
+      cancel() {},
+      async selectModel(request) { calls.push([request.sessionId, request.provider, request.model]); return { provider: request.provider, model: request.model }; }
+    },
+    workspaceRegistry: { list: () => [] },
+    subagents: { async sendMessage() { return "m"; } }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+
+  // Default: a new member inherits the Lead's model.
+  mod.apply(ctx, { delegationEngine: "session" });
+  const addRaw = await lead.__registered.get("team_member_add").execute({ name: "alice", brief: "go" }, { agent: lead });
+  const added = typeof addRaw?.text === "string" ? JSON.parse(addRaw.text) : addRaw;
+  assert.deepEqual(calls[0], ["sync-member", "lead-provider", "lead-model"], "a new member inherits the Lead's model by default");
+  assert.equal(added.effects.some((effect) => effect.startsWith("model inherited from the Lead")), true);
+
+  // Switching the model through ANY target switches the whole team (Lead + members).
+  calls.length = 0;
+  const switched = await lead.__registered.get("team_member_edit").execute(
+    { target: "lead", action: "model", value: "shared/model-b" },
+    { agent: lead }
+  );
+  const switchResult = typeof switched?.text === "string" ? JSON.parse(switched.text) : switched;
+  const sessions = calls.map((entry) => entry[0]).sort();
+  assert.deepEqual(sessions, ["sync-lead", "sync-member"], "sync on: the Lead and every member switch together");
+  assert.equal(calls.every((entry) => entry[1] === "shared" && entry[2] === "model-b"), true);
+  assert.equal(switchResult.effects.some((effect) => effect.includes("sync on")), true);
+
+  // Opt-out keeps per-member models (the old behaviour).
+  const off = makeAgent("per-member-lead");
+  off.options = { provider: "lead-provider", model: "lead-model" };
+  const other = makeAgent("per-member-member");
+  live.push(off, other);
+  mod.apply(ctx, { delegationEngine: "session", syncMemberModels: false });
+  calls.length = 0;
+  await off.__registered.get("team_member_add").execute({ name: "bob", brief: "go" }, { agent: off });
+  assert.equal(calls.length, 0, "sync off: a new member does not inherit a model");
+  await off.__registered.get("team_member_edit").execute({ target: "bob", action: "model", value: "own/model-c" }, { agent: off });
+  assert.deepEqual(calls, [["sync-member", "own", "model-c"]], "sync off: only the target switches");
+});
+
 await check("members stay out of the project list unless explicitly attached", async () => {
   // The workspace session list is driven by `workspace.sessionIds`, i.e. by
   // attachment. Creating the member with `workspaceId` is what put it in the
