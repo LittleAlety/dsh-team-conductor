@@ -2011,6 +2011,89 @@ await check("session engine creates independent sessions with team membership an
   await assert.rejects(() => root.__registered.get("team_message").execute({ target: member.id, message: "No" }, { agent: root }), /deleted/);
 });
 
+await check("task board records who claimed a task, when, and how", async () => {
+  const root = makeAgent("board-lead");
+  const live = [root];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    sessionController: {
+      async create() { return { sessionId: "board-member-session" }; },
+      async prompt() { return { accepted: true }; },
+      async rename() { return { title: "x" }; },
+      cancel() {},
+      async selectModel() { return { provider: "p", model: "m" }; }
+    },
+    workspaceRegistry: { list: () => [] },
+    subagents: { async sendMessage() { return "m"; } }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, { delegationEngine: "session" });
+  const call = async (name, args) => {
+    const raw = await root.__registered.get(name).execute(args, { agent: root });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+
+  await call("team_member_add", { name: "analyst", brief: "go", alias: "分析师" });
+  const added = await call("team_task_add", {
+    title: "Collect the latency numbers",
+    details: "Read work/bench.json and report p50/p95 per endpoint; ignore warm-up rows.",
+    acceptance: "A table with p50 and p95 for every endpoint, and the warm-up rows excluded."
+  });
+
+  // The board carries the detail and the (still unclaimed) state.
+  let board = await call("team_task_list", {});
+  let task = board.tasks.find((entry) => entry.id === added.task.id);
+  assert.equal(task.acceptance, "A table with p50 and p95 for every endpoint, and the warm-up rows excluded.");
+  assert.equal(task.owner, null);
+  assert.equal(task.claimedAt, null);
+  assert.equal(task.claimedBy, null);
+  assert.equal(task.createdBy, "lead");
+
+  // A member claims it by itself.
+  const store = T.readStore(root.id);
+  T.mutateTask(root.id, store, { taskId: task.id, action: "claim", expectedRevision: task.revision }, "analyst");
+  board = await call("team_task_list", {});
+  task = board.tasks.find((entry) => entry.id === task.id);
+  assert.equal(task.owner, "analyst");
+  assert.equal(task.claimedBy, "analyst");
+  assert.equal(task.claimKind, "claim", "a member claim is recorded as a claim");
+  assert.equal(typeof task.claimedAt, "string");
+  assert.equal(task.ownerLabel, "分析师", "the board shows the alias next to the durable name");
+  assert.equal(task.ownerSessionId, "board-member-session", "the board points at the member's conversation");
+
+  // Completing records who finished it.
+  T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "complete", expectedRevision: task.revision }, "analyst");
+  board = await call("team_task_list", {});
+  task = board.tasks.find((entry) => entry.id === task.id);
+  assert.equal(task.status, "done");
+  assert.equal(task.completedBy, "analyst");
+  assert.equal(typeof task.completedAt, "string");
+
+  // Reopen + release must clear the claim stamps, or the board would lie.
+  T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "reopen", expectedRevision: task.revision }, "lead");
+  const reopened = (await call("team_task_list", {})).tasks.find((entry) => entry.id === task.id);
+  assert.equal(reopened.completedAt, null, "reopening clears the completion stamp");
+  T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "release", expectedRevision: reopened.revision }, "analyst");
+  const released = (await call("team_task_list", {})).tasks.find((entry) => entry.id === task.id);
+  assert.equal(released.status, "pending");
+  assert.equal(released.claimedBy, null);
+  assert.equal(released.claimedAt, null);
+  assert.equal(released.claimKind, null);
+
+  // The auto-dispatcher's claims are distinguishable from a member's own claim.
+  const second = await call("team_task_add", { title: "Second job" });
+  T.mutateTask(root.id, T.readStore(root.id), { taskId: second.task.id, action: "claim", expectedRevision: second.task.revision, assignedBy: "auto" }, "analyst");
+  const auto = (await call("team_task_list", {})).tasks.find((entry) => entry.id === second.task.id);
+  assert.equal(auto.claimKind, "auto", "dispatch claims are marked auto");
+});
+
 await check("auto picks the session engine when the composition can create sessions", async () => {
   const created = [];
   const root = makeAgent("auto-root");

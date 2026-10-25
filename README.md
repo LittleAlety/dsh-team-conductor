@@ -718,6 +718,28 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 
 > 为什么只能靠 label：那个面板由内核的 `dsh-client-ui-subagent` 渲染，列的是当前会话的所有子会话，没有"按来源过滤/加来源徽章"的插槽；我们能控制的只有 spawn 时的 descriptor（`label`/`mode`/`provider`）。所以区分手段就是把标识写进 label，并把团队成员的权威视图放在本插件自己的面板（含 `availability` 与上下文压力）。
 
+### 任务板条目长什么样
+
+写任务时请写详细——看板是给人看的工作面，不是一串标题：
+
+| 字段 | 含义 |
+|---|---|
+| `title` | 一句话祈使句 |
+| `details` | 背景 / 去哪看 / 约束 / 怎么验证。读者没有你的上下文，别复述标题 |
+| `acceptance` | **完成标准**：一条可判定的检查（测试通过、文件存在、数字对） |
+| `deps` / `files` / `priority` | 依赖、写作用域（重叠只警告）、自动派发的排序 |
+
+每条任务还会自动记录**谁认领的**：
+
+| 字段 | 含义 |
+|---|---|
+| `owner` / `ownerLabel` / `ownerSessionId` | durable 名 / 别名（面板显示这个）/ 该成员的会话 id |
+| `claimedBy` / `claimedAt` / `claimKind` | 认领人、时间、"自己认领 / Lead 指派 / 自动派发" |
+| `completedBy` / `completedAt` | 谁做完的、什么时候；`reopen` 会清掉完成戳，`release` 会清掉认领戳 |
+| `createdBy` | 建任务的人 |
+
+面板上每条任务是「标题行 + 认领信息行 + 详情（最多 3 行）+ 完成标准 + 操作行」，认领方式用徽章区分（自动派发为绿色）。
+
 ## 三个委派引擎（`delegationEngine`）
 
 插件有三种底层，工具面相同，切换只改一个配置。**v1.0 起默认 `delegationEngine: "auto"`**：组合里能创建会话（桌面/API 有 `sessionController`）就用 `session`，否则退回 `conductor`；也可以显式钉死 `session`/`conductor`/`kernel`。`session` 下团队成员就是普通独立会话，和 Lead 的对话没有区别，只是多了一条侧车的团队关联；`kernel`（走内核 roster）和 `conductor`（可续接子代理）保留为可选。
