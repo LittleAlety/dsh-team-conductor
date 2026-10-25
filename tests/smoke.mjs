@@ -1279,6 +1279,9 @@ await check("the conductor engine spawns and drains its own roster", async () =>
   assert.equal(spawned.length, 1, "the member must be a freshly spawned continuable subagent");
   assert.equal(spawned[0].spec.provider, "spawn");
   assert.equal(spawned[0].spec.request.parent, lead, "the Lead must be the delegation parent");
+  // The subagent panel renders `label ?? id` as the row title, so the label is the
+  // only place a durable team member can be told apart from an ad-hoc subagent.
+  assert.equal(spawned[0].spec.label, "Agent Team · alpha", "the row label must carry the team marker");
   // The prompt must be CONTENT BLOCKS: a bare string is spread per character by
   // the seam, which killed the first live spawn with
   // "DeepSeek Messages cannot represent user/tool-result content undefined".

@@ -672,6 +672,19 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 
 每次派发在任务的 `assignedBy` 上留 `auto`，便于区分人工与自动。
 
+### 团队成员 vs 一次性子代理（面板里怎么分）
+
+`@deepseek-ai/dsh-client-ui-subagent` 的「子智能体」面板每行渲染的是 **`entry.label ?? entry.id`** 加一个 mode 徽章。conductor 成员本质就是 continuable subagent，所以**光看形态分不出来**——因此本插件在创建成员时把 label 写成：
+
+```
+Agent Team · <名字>        mode: continuable     ← 团队成员
+<任意 label 或 session id>  mode: one-shot        ← 一次性子代理
+```
+
+前缀可用配置改：`memberLabelPrefix`（默认 `"Agent Team · "`，会保证与名字之间恰好一个空格）。
+
+> 为什么只能靠 label：那个面板由内核的 `dsh-client-ui-subagent` 渲染，列的是当前会话的所有子会话，没有"按来源过滤/加来源徽章"的插槽；我们能控制的只有 spawn 时的 descriptor（`label`/`mode`/`provider`）。所以区分手段就是把标识写进 label，并把团队成员的权威视图放在本插件自己的面板（含 `availability` 与上下文压力）。
+
 ## 两个委派引擎（`delegationEngine`）
 
 插件有两种底层，工具面完全相同，切换只改一个配置：
