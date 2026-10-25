@@ -2011,6 +2011,66 @@ await check("session engine creates independent sessions with team membership an
   await assert.rejects(() => root.__registered.get("team_message").execute({ target: member.id, message: "No" }, { agent: root }), /deleted/);
 });
 
+await check("auto picks the session engine when the composition can create sessions", async () => {
+  const created = [];
+  const root = makeAgent("auto-root");
+  const live = [root];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    sessionController: {
+      async create(request) { created.push(request); return { sessionId: "auto-member-session" }; },
+      async prompt() { return { accepted: true }; },
+      async rename() { return { title: "x" }; },
+      cancel() {},
+      async selectModel() { return { provider: "p", model: "m" }; }
+    },
+    workspaceRegistry: { list: () => [] },
+    subagents: { async startContinuable() { throw new Error("the session engine must not spawn a subagent"); } }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, {});
+  const raw = await root.__registered.get("team_member_add").execute({ name: "auto-member", brief: "go" }, { agent: root });
+  const added = typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  assert.equal(created.length, 1, "auto must create a real session when sessionController is mounted");
+  assert.equal(added.member.id, "auto-member-session");
+  assert.equal(added.member.engine, "session");
+});
+
+await check("auto falls back to the conductor engine when sessions are unavailable", async () => {
+  const spawned = [];
+  const root = makeAgent("auto-headless-root");
+  const live = [root];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    // No sessionController: this is the headless shape.
+    subagents: {
+      async startContinuable(spec) { spawned.push(spec); return { childId: "auto-child", messageId: "m" }; },
+      async drainContinuableChildren() {},
+      async sendMessage() { return "m"; }
+    }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, {});
+  const raw = await root.__registered.get("team_member_add").execute({ name: "fallback", brief: "go" }, { agent: root });
+  const added = typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  assert.equal(spawned.length, 1, "without sessionController the member must be a continuable subagent");
+  assert.equal(added.member.id, "auto-child");
+});
+
 await check("conductor subagents cannot be model-switched through ordinary session controller", async () => {
   const root = makeAgent("model-conductor-root");
   let attempted = 0;

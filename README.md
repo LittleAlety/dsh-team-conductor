@@ -720,9 +720,9 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 
 ## 三个委派引擎（`delegationEngine`）
 
-插件有三种底层，工具面相同，切换只改一个配置。**v1.0 起默认 `session`**——团队成员就是普通独立会话，和 Lead 的对话没有区别，只是多了一条侧车的团队关联；`kernel`（走内核 roster）和 `conductor`（可续接子代理）保留为可选。
+插件有三种底层，工具面相同，切换只改一个配置。**v1.0 起默认 `delegationEngine: "auto"`**：组合里能创建会话（桌面/API 有 `sessionController`）就用 `session`，否则退回 `conductor`；也可以显式钉死 `session`/`conductor`/`kernel`。`session` 下团队成员就是普通独立会话，和 Lead 的对话没有区别，只是多了一条侧车的团队关联；`kernel`（走内核 roster）和 `conductor`（可续接子代理）保留为可选。
 
-| | `kernel` | `conductor` | `session`（**v1.0 起默认**） |
+| | `kernel` | `conductor` | `session`（**v1.0 默认引擎**） |
 |---|---|---|---|
 | 成员是什么 | 内核 Agent Teams roster 条目 | `subagents.startContinuable` 创建的可续接子代理 | `sessionController.create` 创建的普通独立会话 |
 | 名册在哪 | 内核 roster（只增不删） | 插件侧车 `teams/<root>.json` | 插件侧车 `teams/<root>.json` |
