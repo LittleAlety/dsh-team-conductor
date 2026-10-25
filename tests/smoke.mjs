@@ -2191,6 +2191,40 @@ await check("a member's completion notifies the Lead for review; the Lead's own 
   assert.equal(sent.length, 0, "and nothing was delivered through the subagent channel either");
 });
 
+await check("auto resolves the engine before the tool list is built, so aliases exist", async () => {
+  // Live regression: with delegationEngine "auto" the tools were built before the
+  // engine was resolved, so `sidecarEngine(options)` was false and the seven legacy
+  // aliases were never registered — the process reported 9 tools instead of 16.
+  const root = makeAgent("alias-auto-root");
+  const live = [root];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    sessionController: {
+      async create() { return { sessionId: "alias-auto-member" }; },
+      async prompt() { return { accepted: true }; },
+      async rename() { return { title: "x" }; },
+      cancel() {},
+      async selectModel() { return { provider: "p", model: "m" }; }
+    },
+    workspaceRegistry: { list: () => [] },
+    subagents: { async sendMessage() { return "m"; } }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, {}); // no explicit engine -> auto
+  const names = [...root.__registered.keys()];
+  for (const alias of ["spawn_teammate", "send_message", "list_agents", "interrupt_agent", "team_task_create", "team_task_get"]) {
+    assert.ok(names.includes(alias), `auto->session must also register the legacy alias ${alias} (got ${names.length} tools)`);
+  }
+  assert.equal(names.length, 16, "nine canonical tools plus seven aliases");
+});
+
 await check("auto picks the session engine when the composition can create sessions", async () => {
   const created = [];
   const root = makeAgent("auto-root");
