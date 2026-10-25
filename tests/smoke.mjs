@@ -304,7 +304,9 @@ const ctx = {
 // run
 // ---------------------------------------------------------------------------
 
-mod.apply(ctx, {});
+// This whole fixture exercises the kernel roster path, so it must say so: as of
+// v1.0 the plugin's default engine is `session`.
+mod.apply(ctx, { delegationEngine: "kernel" });
 
 const tool = (agent, toolName) => {
   const definition = agent.__registered.get(toolName);
@@ -1605,11 +1607,14 @@ await check("a member conversation shows its Lead's team, not a team of its own"
   assert.equal(unknown.mismatch, true);
 });
 
-await check("auto-assign is opt-in", () => {
+await check("auto-assign is on unless explicitly disabled", () => {
   // normalizeOptions(ctx, config) — the ctx comes first.
+  // The user asked for this to be on by default ("默认开启"), and the code comment
+  // in normalizeOptions says so; `enabled: false` is the off switch.
   const quiet = { logger: { info: () => {}, warn: () => {} } };
-  assert.equal(T.normalizeOptions(quiet, {}).autoAssign.enabled, false);
-  assert.equal(T.normalizeOptions(quiet, { autoAssign: {} }).autoAssign.enabled, false);
+  assert.equal(T.normalizeOptions(quiet, {}).autoAssign.enabled, true);
+  assert.equal(T.normalizeOptions(quiet, { autoAssign: {} }).autoAssign.enabled, true);
+  assert.equal(T.normalizeOptions(quiet, { autoAssign: { enabled: false } }).autoAssign.enabled, false);
   assert.equal(T.normalizeOptions(quiet, { autoAssign: { enabled: true } }).autoAssign.enabled, true);
 });
 
@@ -1865,6 +1870,86 @@ await check("terminal URL parsing stays on loopback and renders snapshots", asyn
     await runCommand(parseArgs(["--session", "root", "member", "model", "worker", "provider/model"]));
     assert.deepEqual(JSON.parse(seen[1].init.body).args, { target: "worker", action: "model", value: "provider/model" });
   } finally { globalThis.fetch = oldFetch; }
+});
+
+await check("session engine: interrupt, retire and delete act on the session, not on a roster", async () => {
+  const calls = [];
+  const cancelled = [];
+  const root = makeAgent("sess-root");
+  const member = makeAgent("sess-member");
+  const live = [root, member];
+  const controller = {
+    async create(request) {
+      calls.push(["create", request]);
+      return { sessionId: "sess-member" };
+    },
+    async prompt(request) {
+      calls.push(["prompt", request]);
+      return { accepted: true };
+    },
+    cancel(request) {
+      cancelled.push(request);
+    },
+    async selectModel(request) {
+      calls.push(["model", request]);
+      return { provider: request.provider, model: request.model };
+    }
+  };
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    sessionController: controller,
+    workspaceRegistry: { list: () => [] },
+    subagents: {
+      async startContinuable() { return { childId: "unused", messageId: "m" }; },
+      async drainContinuableChildren() {},
+      async sendMessage() { return "m"; }
+    }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, { delegationEngine: "session" });
+  const call = async (agent, name, args) => {
+    const raw = await agent.__registered.get(name).execute(args, { agent });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+
+  await call(root, "team_member_add", { name: "analyst", brief: "Analyze" });
+  assert.equal(calls[0][0], "create");
+
+  // interrupt -> sessionController.cancel on the member's session
+  await call(root, "team_member_edit", { target: "analyst", action: "interrupt" });
+  assert.ok(cancelled.some((request) => request.sessionId === "sess-member"), "interrupt must cancel the member's turn");
+
+  // retire -> flag set, conversation untouched; a running turn is stopped
+  member.status = "running";
+  const retired = await call(root, "team_member_edit", { target: "analyst", action: "retire" });
+  assert.ok(retired.effects.some((effect) => effect.includes("retired")), `retire must report itself: ${JSON.stringify(retired.effects)}`);
+  assert.equal(T.readStore(root.id).members.analyst.retired, true);
+  assert.equal(cancelled.filter((request) => request.sessionId === "sess-member").length >= 2, true, "retire must also stop a running turn");
+  member.status = "idle";
+
+  // restore, then delete -> record archived, name reusable, session preserved
+  await call(root, "team_member_edit", { target: "analyst", action: "restore" });
+  const removed = await call(root, "team_member_delete", { target: "analyst" });
+  assert.equal(removed.deleted.engine, "session");
+  assert.ok(
+    removed.effects.some((effect) => effect.includes("history remain available")),
+    `the effect must say the conversation survives: ${JSON.stringify(removed.effects)}`
+  );
+  const afterDelete = T.readStore(root.id);
+  assert.equal(afterDelete.members.analyst, undefined, "the live name must be gone");
+  assert.equal(Object.keys(afterDelete.members).some((key) => key.startsWith("analyst~")), true, "an archive record keeps the id");
+
+  // the name is free again, and the new member is a fresh session
+  const again = await call(root, "team_member_add", { name: "analyst", brief: "Back again" });
+  assert.equal(again.member.target, "analyst");
+  assert.equal(calls.filter(([kind]) => kind === "create").length, 2, "a reuse must create a new session");
 });
 
 await check("session engine creates independent sessions with team membership and model selection", async () => {

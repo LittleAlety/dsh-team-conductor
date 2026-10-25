@@ -4,7 +4,7 @@
 
 **它有三种底层，工具面相同，靠一个配置切换**（详见 [三个委派引擎](#三个委派引擎delegationengine)）：
 
-| | `kernel`（默认） | `conductor` | `session` |
+| | `kernel` | `conductor` | `session`（**v1.0 默认**） |
 |---|---|---|---|
 | 成员是什么 | 内核 Agent Teams 的 roster 条目 | 可续接子代理 | 与 Lead 一样的普通独立会话，通过侧车关联团队 |
 | 名册在哪 | 内核 roster（只增不删） | 插件侧车 `teams/<root>.json` | 插件侧车 `teams/<root>.json` |
@@ -720,9 +720,9 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 
 ## 三个委派引擎（`delegationEngine`）
 
-插件有三种底层，工具面相同，切换只改一个配置：
+插件有三种底层，工具面相同，切换只改一个配置。**v1.0 起默认 `session`**——团队成员就是普通独立会话，和 Lead 的对话没有区别，只是多了一条侧车的团队关联；`kernel`（走内核 roster）和 `conductor`（可续接子代理）保留为可选。
 
-| | `kernel`（默认） | `conductor` | `session` |
+| | `kernel` | `conductor` | `session`（**v1.0 起默认**） |
 |---|---|---|---|
 | 成员是什么 | 内核 Agent Teams roster 条目 | `subagents.startContinuable` 创建的可续接子代理 | `sessionController.create` 创建的普通独立会话 |
 | 名册在哪 | 内核 roster（只增不删） | 插件侧车 `teams/<root>.json` | 插件侧车 `teams/<root>.json` |
