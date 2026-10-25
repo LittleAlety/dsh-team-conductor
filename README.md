@@ -2,18 +2,18 @@
 
 **一句话定位：** DeepSeek Harness Agent Teams 的统一控制面——一次看清 roster 与每个成员的上下文压力、就地增删与编辑成员、运行时调整容量、按名字或子会话 id 把消息送达，并自带共享任务板与可选的自动派活。
 
-**它有两种底层，工具面相同，靠一个配置切换**（详见 [两个委派引擎](#两个委派引擎delegationengine)）：
+**它有三种底层，工具面相同，靠一个配置切换**（详见 [三个委派引擎](#三个委派引擎delegationengine)）：
 
-| | `kernel`（默认） | `conductor` |
-|---|---|---|
-| 成员是什么 | 内核 Agent Teams 的 roster 条目 | 本插件用 `subagents.startContinuable` 起的可续接子代理 |
-| 名册在哪 | 内核 roster（只增不删、名字永不复用） | 插件侧车 `teams/<root>.json`（随便改） |
-| 删除一个成员 | 墓碑 + 拦消息 + **上限 +1 补偿** | drain 子代理，**名额还给池**、**名字可复用** |
-| 需要内核 Team 包 | 需要 | **不需要**（对应三条实体置 `disabled: true`） |
+| | `kernel`（默认） | `conductor` | `session` |
+|---|---|---|---|
+| 成员是什么 | 内核 Agent Teams 的 roster 条目 | 可续接子代理 | 与 Lead 一样的普通独立会话，通过侧车关联团队 |
+| 名册在哪 | 内核 roster（只增不删） | 插件侧车 `teams/<root>.json` | 插件侧车 `teams/<root>.json` |
+| 删除一个成员 | 墓碑 + 拦消息 + 上限补偿 | drain 子代理，归还池名额 | 解除团队关联，保留独立会话及历史 |
+| 需要内核 Team 包 | 需要 | 不需要 | 不需要 |
 
 九个工具全场一致：`team_overview`（roster + 上下文压力 + 容量 + 结算通知账本）、`team_member_edit`（13 个 action）、`team_member_add`、`team_member_delete`、`team_capacity_set`、`team_message`、以及自带任务板的 `team_task_add` / `team_task_list` / `team_task_update`（依赖、CAS revision、写作用域重叠警告）。
 
-**`kernel` 引擎下它叠加而不替换**：不动任何内核行，内核的 `spawn_teammate`、`send_message`、`list_agents`… 全部照常工作。**`conductor` 引擎下它接管**：内核 `agent-team` / `tool-agent-team` / `ui-agent-team` 三条实体置 `disabled: true`，并把七个旧工具名注册成**转发别名**（`spawn_teammate` → `team_member_add` 等），所以任何还写着旧名字的提示、技能或习惯都会落到本插件，而不是报 "unknown tool"。
+**`kernel` 引擎下它叠加而不替换**：内核 Agent Teams 工具照常工作。**`conductor` 和 `session` 引擎下它接管**：内核 `agent-team` / `tool-agent-team` / `ui-agent-team` 三条实体置 `disabled: true`，并把七个旧工具名注册成转发别名（`spawn_teammate` → `team_member_add` 等）。`session` 模式的成员拥有普通独立会话，可在会话列表打开，支持各自的模型选择；切换模型还会更新全局默认模型。
 
 此外它还：注入一段 `team:conductor:policy` prompt 段（**按引擎生成**，不含另一套底层的说法）、安装两个包装型守卫（结算通知去重、已删成员消息拦截）、提供浏览器半边（工具卡片、设置里的控制台、会话页头的「Agent Team」按钮）和四条回环路由（`/status`、`/client-hello`、`/team`、`/action`）。
 
@@ -39,7 +39,7 @@ dsh-team-conductor/
 
 ### 浏览器半边：工具卡片
 
-GUI 的工具卡片是按**工具名**查 `tool.call.toolview` 插槽决定的；没有专属渲染时，结果就是一段原始 JSON。`lib/client.js` 为九个工具各注册一个卡片：
+GUI 的工具卡片是按**工具名**查 `tool.call.toolview` 插槽决定的；没有专属渲染时，结果就是一段原始 JSON。`lib/client.js` 为六个成员管理工具注册专属卡片，三个任务板工具仍使用通用结果视图：
 
 | 工具 | 卡片内容 |
 |---|---|
@@ -72,7 +72,7 @@ ctx.slots.inject("settings.section", () => ctx.slots.register({
 
 浏览器半边会尽力定位"当前会话"（先看 URL 里的 UUID，再在持久化 store `dsh.sessions.current` 的值里搜一个 UUID），定位到就直接显示它的团队；同时只要有**多个**活跃团队就渲染一排选择器（`根会话前 8 位 · 已用名额`），所以任何一个有活跃团队的会话都够得着。
 
-> 能力边界：**团队只在它的 Lead 会话存活时存在**。会话关闭、Lead 被释放后，内核里就没有这支队伍了，面板会显示「无活跃团队」——这不是面板的缺陷。
+> 能力边界：`kernel` 模式的团队依赖存活的 Lead；Lead 被释放后，内核名册暂时不可见。`session` 模式的成员是独立会话，Lead 暂时未加载时仍可通过侧车记录找到所属团队。
 
 打开路径：**设置 → Agent Team**。
 
@@ -540,14 +540,14 @@ curl -i http://127.0.0.1:19387/dsh-team-conductor/status
 node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一版（重启后跑这个）
 ```
 
-> **改完代码必须重启 Harness。** 宿主插件的模块被 ESM loader 缓存，磁盘上的新代码不会热生效——运行中的进程会一直服务它首次 import 的那一版。`scripts/verify-live.mjs` 就是用来区分「磁盘上是 0.6.0」和「进程里真的是 0.6.0」的：版本号、九个工具、两个守卫状态逐项断言，不一致时退出码非 0 并直接提示重启。
+> **改完代码必须重启 Harness。** 宿主插件的模块被 ESM loader 缓存，磁盘上的新代码不会热生效。`scripts/verify-live.mjs` 会比较磁盘版本与运行进程的版本、工具和守卫状态；不一致时提示重启。
 
-`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务（`subagents` 用 **Proxy** 包裹、`notifySettlement` 挂在 `continuations.activations` 上，形状照内核源码），**共 70 项**，覆盖：插件导出面、九个工具的 schema 是否落在 `tools.register()` 的受支持子集内、注册契约（`output { schema, render }`）、守卫落点与幂等（含 Proxy 回读陷阱与 owner 重校验）、**冷启动下 `webServer` 晚绑定后状态路由经钩子补注册**、`team_overview` 的测量/容量/账本/子代理过滤/`availability`/`include_pressure` 跳过路径、`team_member_edit` 全部 13 个 action 与参数拒绝（含 rename 冲突与可回退旧名、`lead` 保留名拒绝、reassign 的 `taskHandover` 两种结局）、`team_capacity_set` 的双写与两条拒绝路径、`team_message` 的两条投递通道、删除后按名字与**按 id** 的双重拦截、目标解析（含历史名与 id 形状收紧）、饱和梯子、账本分组与缓存、侧车往返/缓存失效/按 root 隔离、detached header 完整性、状态路由。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
+`tests/smoke.mjs` 自带伪造的 cordis 上下文与宿主服务，覆盖插件导出与工具 schema、守卫、路由、三种引擎的成员生命周期、独立会话模型选择与失败恢复、任务板、浏览器操作所用端点和终端命令。**以实际输出为准**：套件会逐条报告，失败项不会伪装成通过。
 
 状态路由（`GET`/`HEAD`，其余方法 405；非回环来源 403）返回：
 
 ```json
-{ "ok": true, "plugin": "dsh-team-conductor", "version": "0.6.0",
+{ "ok": true, "plugin": "dsh-team-conductor", "version": "0.7.0",
   "teamService": true,
   "tools": ["team_overview", "team_member_edit", "team_capacity_set", "team_message",
             "team_member_add", "team_member_delete"],
@@ -615,7 +615,7 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 
 ## 兼容性
 
-- **插件版本：** 本文档对齐 `0.6.0`（`package.json` 的 `version` 与 `lib/index.js` 的 `PLUGIN_VERSION` 一致；状态路由自报同一版本号）。
+- **插件版本：** 本文档对齐 `0.7.0`（`package.json` 的 `version` 与 `lib/index.js` 的 `PLUGIN_VERSION` 一致；状态路由自报同一版本号）。
 - **内核版本：** 面向 DeepSeek Harness `0.2.0-rc.2`（逐个核对 `@deepseek-ai/dsh-tools`、`dsh-subagent`、`dsh-token-meter`、`dsh-compaction-basic`、`dsh-llm`、`dsh-experimental-agent-team`、`dsh-experimental-tool-agent-team`、`dsh-system-prompt` 的 `package.json` `version` 均为 `0.2.0-rc.2`）。本文档的所有内核坐标都取自该版本。
 - **不 import 任何 `@deepseek-ai/*` 包：** profile 插件位于 `app.asar` 之外，从 profile 目录 import harness 包会以 `ERR_MODULE_NOT_FOUND` 失败（每个随包发布的 profile 插件都是自带依赖或完全不依赖）。因此本插件只 import Node 内建模块，能力全部经 `ctx.get()` 拿服务（`agentTeams`、`subagents`、`tokenMeter`、`compaction`、`sessions`、`sessionPersistence`、`llm`、`webServer` 都是惰性获取，缺了就降级而不是崩），工具定义按 `tools.register()` 接受的 JSON Schema 子集手写，注册契约要求 `output { schema, render }` 也手写满足。
 - **声明的必需服务：** `inject = ["agents", "tools", "systemPrompt"]`；其余服务全是可选。`agentTeams` 缺席时，插件仍装载，只有顶层 root 会被当作 workplace，容量/roster/team 消息相关能力报告为不可用。
@@ -638,7 +638,31 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 
 ## 任务板与自动分配
 
-内核那套任务板随 Team bundle 一起关掉了，所以这是插件自带的：存在同一个侧车文件里（`tasks` 字段），两种引擎都能用，重启不丢。
+### 终端控制台
+
+安装 bundle 后可运行 `dsh-team`（当前已验证宿主端口为 `19387`，可用 `--url` 覆盖）。不带命令且连接到终端时进入交互模式，先输入 `teams` 查看 root，再输入 `use ROOT` 选择团队。命令模式适合脚本和快速操作：
+
+```sh
+dsh-team teams
+dsh-team --session ROOT team
+dsh-team --session ROOT task add "Review the diff"
+dsh-team --session ROOT task assign t1 MEMBER
+dsh-team --session ROOT task complete t1
+dsh-team --session ROOT member add reviewer "Review code"
+dsh-team --session ROOT member message reviewer "Please check t1"
+dsh-team --session ROOT member model reviewer provider/model
+```
+
+`--json` 返回完整 JSON，便于脚本处理；`status` 检查宿主版本。端口以实际 Harness Web Server 端口为准。控制台只接受 HTTP loopback URL，操作端点拒绝跨源浏览器请求。
+
+### 独立会话团队模式
+
+设置 `delegationEngine: session` 后，`team_member_add` 会用 `sessionController.create` 建立普通独立会话，再通过侧车名册把它关联到 Lead。成员会话没有 `parentSession`，在会话列表中与 Lead 一样可打开；删除成员仅解除团队关联并保留历史。`retire` 会标记软下线，正在运行时调用 `sessionController.cancel`；`restore` 可重新接收简报。此模式没有 Team 成员名额上限，也不占用 subagent 池。`context: fork` 不适用。
+
+原有 `delegationEngine: conductor` 的 continuable subagent 历史不会自动迁移为独立会话。可继续使用原模式访问旧成员；新模式只列出以 session 模式创建的记录。成员指定模型和后续切换使用 `sessionController.selectModel`：选择应用于该会话，但该接口同时会在后台保存全局默认模型，可能改变以后新建会话的默认模型。
+`conductor` 子代理只能在创建时通过 `team_member_add(model=...)` 指定模型；宿主的 `sessionController.selectModel` 拒绝子代理拥有的会话，因此该模式不支持运行中切换模型。`team_member_edit(action=model)` 仅适用于 `session` 模式。
+
+共享任务板由本插件提供，存在同一个侧车文件里（`tasks` 字段），三种引擎都能用，重启不丢。
 
 | 工具 | 作用 |
 |---|---|
@@ -649,7 +673,7 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 **三条硬语义：**
 
 1. **依赖闸门**——`claim` 会拒掉依赖未完成的任务，错误里点名阻塞者（`blocked by t1`）。
-2. **CAS revision**——除 `cancel` 外每个改动都要 `expected_revision`；用旧 revision 会被拒并告诉你当前值。这是防"两个成员基于同一份旧副本互相覆盖"的唯一手段。
+2. **CAS revision**——包括 `cancel` 在内，每个改动都要 `expected_revision`；用旧 revision 会被拒并告诉你当前值。这是防"两个成员基于同一份旧副本互相覆盖"的唯一手段。
 3. **写作用域只警告不阻止**——`files` 命中前缀关系（`src/a` 与 `src/a/b.js`）时，两个 in_progress 任务会互相报重叠；`claim` 不会被拦。
 
 ### 自动分配（内核没有这个能力）
@@ -658,12 +682,12 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 - id: team-conductor
   config:
     autoAssign:
-      enabled: true      # v0.6.1 起默认 true；每次派活都要唤醒成员（花钱），介意就写 false
+      enabled: true      # 默认 false；显式开启后每次派活都会唤醒成员
       intervalMs: 15000  # 3s..600s
       maxPerTick: 1      # 1..5
 ```
 
-每轮只做这几件事：
+每轮会检查每支活跃团队，并在每支团队内做这几件事：
 
 - 候选任务：`pending` + 无 owner + 依赖已满足；按 `priority` 降序、再按创建时间升序；
 - **跳过**与任何 in_progress 任务文件重叠的任务（避免两个写手撞同一批文件）；
@@ -674,9 +698,9 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 
 ### 面板永远显示 Lead 的团队（不是成员会话自己的）
 
-每个顶层会话都是一支团队，而**成员会话本身是一个子会话**。面板是按 session id 取数据的，在成员的对话里那个 id 是**子会话 id**——早期实现按它精确匹配，于是面板空白、UI 操作还会报 `no live Team member`。现在宿主先把任意 session 解析回它的 **Team root** 再匹配：
+每个顶层会话都可以是团队 Lead。`kernel` / `conductor` 成员是子会话；`session` 成员则是独立普通会话，通过侧车记录关联到 Lead。面板按 session id 取数据，宿主先把成员会话解析回它的 **Team root** 再匹配：
 
-- `/team?session=<子会话 id>` 返回该成员的 **Lead 的团队**，并多带三个字段：`sessionId`（解析出的 root）、`requestedSessionId`（你请求的）、`resolvedFrom`（`live`=通过 live agent 的 `parentSession` 走上去，`sidecar`=成员不在线时从侧车记录的 `childId` 反查）；
+- `/team?session=<成员会话 id>` 返回该成员的 **Lead 的团队**，并多带三个字段：`sessionId`（解析出的 root）、`requestedSessionId`（你请求的）、`resolvedFrom`（`live`=通过子会话的 `parentSession` 走上去，`sidecar`=从侧车记录的成员会话 id 反查）；
 - `/action` 的 `session` 同样先解析，所以在成员对话里点按钮，操作的是 Lead 的团队；
 - 客户端据此匹配团队，并在顶部显示一行提示「这是成员会话，显示其所属 Lead 的团队（<root 前 8 位>）」；
 - 真正未知的会话仍然返回空 + `mismatch: true`，不会借用别的团队。
@@ -694,17 +718,18 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 
 > 为什么只能靠 label：那个面板由内核的 `dsh-client-ui-subagent` 渲染，列的是当前会话的所有子会话，没有"按来源过滤/加来源徽章"的插槽；我们能控制的只有 spawn 时的 descriptor（`label`/`mode`/`provider`）。所以区分手段就是把标识写进 label，并把团队成员的权威视图放在本插件自己的面板（含 `availability` 与上下文压力）。
 
-## 两个委派引擎（`delegationEngine`）
+## 三个委派引擎（`delegationEngine`）
 
-插件有两种底层，工具面完全相同，切换只改一个配置：
+插件有三种底层，工具面相同，切换只改一个配置：
 
-| | `kernel`（默认） | `conductor` |
-|---|---|---|
-| 成员是什么 | 内核 Agent Teams 的 roster 条目 | 本插件用 `subagents.startContinuable` 起的可续接子代理 |
-| 名册在哪 | 内核 roster（**只增不删**，名字永不复用） | 插件侧车 `teams/<root>.json`（**随便改**） |
-| 删除一个成员 | 立墓碑 + 拦消息 + **上限 +1 补偿**（名额永久被占） | drain 子代理，**名额还给池**；记录归档，**名字可复用** |
-| 容量上限 | `roster.maxMembers`（desktop 8 / 内核 16） | `maxActiveSubagents`（`dsh-subagent` 的配置，默认 8，**会回收**） |
-| 需要内核 Team 包吗 | 需要 | **不需要** |
+| | `kernel`（默认） | `conductor` | `session` |
+|---|---|---|---|
+| 成员是什么 | 内核 Agent Teams roster 条目 | `subagents.startContinuable` 创建的可续接子代理 | `sessionController.create` 创建的普通独立会话 |
+| 名册在哪 | 内核 roster（只增不删） | 插件侧车 `teams/<root>.json` | 插件侧车 `teams/<root>.json` |
+| 删除一个成员 | 墓碑 + 拦消息 + 上限补偿 | drain 子代理，归还池名额；名字可复用 | 解除团队关联；会话和历史保留，名字可复用 |
+| 容量上限 | `roster.maxMembers` | `maxActiveSubagents` | 无团队成员名额上限 |
+| 模型切换 | 不通过本插件的 `action=model` | 创建时可指定；运行中不支持 | 创建前选择及运行中切换；也会保存全局默认模型 |
+| 需要内核 Team 包吗 | 需要 | 不需要 | 不需要 |
 
 ```yaml
 - id: team-conductor
@@ -725,11 +750,11 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
   disabled: true
 ```
 
-**注意**：切换引擎后名册从空开始——旧的 kernel 成员不再属于任何团队（它们的会话仍在，但 roster 已关）。用 `team_member_add` 重建即可。
+**注意**：三种引擎的名册不会自动互相迁移。切换到 `session` 不会把旧 `conductor` 子代理变成普通会话；要继续使用旧成员，请保留原引擎配置。
 
 ## 打包与发布
 
-**能打成 npm 包**：`npm pack` 产出 6 个文件、约 87 kB（`lib/index.js`、`lib/client.js`、`cordis.patch.yml`、`package.json`、`README.md`、`LICENSE`）。`files` 白名单已限制，测试与脚本不进包。
+**能打成 npm 包**：`npm pack` 包含 7 个白名单文件（`lib/index.js`、`lib/client.js`、`bin/dsh-team.js`、`cordis.patch.yml`、`package.json`、`README.md`、`LICENSE`）。测试与脚本不进包。
 
 ```bash
 npm pack                 # 产出 dsh-team-conductor-<version>.tgz
@@ -750,14 +775,14 @@ pnpm 会把这条 `file:` 规格原样写进 profile 的 `package.json`，于是
 发布之后换成版本规格即可摆脱本地路径：
 
 ```bash
-dsh plugin --profile desktop add dsh-team-conductor@0.6.0
+dsh plugin --profile desktop add dsh-team-conductor@0.7.0
 ```
 
 也可以不发布，直接用 GitHub 或本地 tarball 安装：
 
 ```bash
 dsh plugin --profile desktop add github:LittleAlety/dsh-team-conductor
-dsh plugin --profile desktop add "file:C:/path/to/dsh-team-conductor-0.6.0.tgz"
+dsh plugin --profile desktop add "file:C:/path/to/dsh-team-conductor-0.7.0.tgz"
 ```
 
 > 用 `file:` 安装时，**改代码不会自动生效**：pnpm 复制的是快照，升级要重新 `add` 或直接覆盖 `node_modules/dsh-team-conductor/lib/*.js`（同一路径重复 `add` 是空操作，pnpm 会报 `added 0`）。
@@ -766,6 +791,6 @@ dsh plugin --profile desktop add "file:C:/path/to/dsh-team-conductor-0.6.0.tgz"
 
 `dsh-team-conductor` is a DeepSeek Harness profile bundle that adds an Agent Teams control plane. Nine tools ship: `team_overview` (roster with per-member context pressure, capacity, settlement-notice ledger), `team_member_edit` (alias/rename/describe/priority/tags/budget/model/rebrief/reassign/retire/restore/compact/interrupt), `team_member_add`, `team_member_delete`, `team_capacity_set`, `team_message` (name, alias, former name or child session id), and a sidecar-backed task board — `team_task_add`, `team_task_list`, `team_task_update` with dependencies, compare-and-set revisions and write-scope overlap warnings. An injected `team:conductor:policy` section at order 640 tells the model which layer it is running on and which tools to use.
 
-Two delegation engines share one tool surface (`delegationEngine`): `kernel` drives the upstream Agent Teams roster (append-only: names never reused, a deleted entry keeps its slot, hence the ceiling compensation); `conductor` spawns ordinary continuable subagents and keeps the roster in this plugin's sidecar, so rename/remove are plain edits, a removal returns its slot to the subagent pool, and names are reusable. Under `conductor` the seven legacy kernel tool names (`spawn_teammate`, `send_message`, `list_agents`, `interrupt_agent`, `wait_agent`, `team_task_create`, `team_task_get`) are registered as forwarding aliases, and an optional dispatcher (`autoAssign`) hands ready tasks to idle members — claiming with compare-and-set first and rolling the claim back if the wake-up fails.
+Three delegation engines share one tool surface (`delegationEngine`): `kernel` uses the upstream append-only Agent Teams roster; `conductor` uses continuable subagents and a sidecar roster; `session` creates ordinary independent DSH sessions and links them to a Team through the sidecar. Session members appear as normal conversations, can select their own model, and retain their history when removed from a Team. `sessionController.selectModel` also saves the global default model. Existing conductor subagent history is not automatically migrated. The seven legacy kernel tool names forward to this plugin under `conductor` and `session`. Optional `autoAssign` hands ready tasks to idle members with compare-and-set claims and rollback after failed delivery.
 
 It imports no `@deepseek-ai/*` package, keeps a per-root sidecar at `$DSH_HOME/dsh-team-conductor/teams/<rootSessionId>.json`, exposes loopback-only routes (`/status`, `/client-hello`, `/team`, `/action`) and a browser half that renders tool cards, a Settings section and a session-header button. Built and verified against kernel `0.2.0-rc.2`; MIT licensed.

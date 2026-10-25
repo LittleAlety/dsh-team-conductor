@@ -8,7 +8,7 @@
  * picked the new build up — it asserts the status route's contract instead of
  * eyeballing JSON.
  *
- * It is engine aware: under `conductor` there is no kernel Team service, so
+ * It is engine aware: under `conductor` or `session` there is no kernel Team service, so
  * `teamService` is false and the deleted-target guard reports `not-applicable`
  * by design. Those are expectations, not failures.
  *
@@ -76,7 +76,7 @@ check(version === onDisk, `version mismatch: on disk ${onDisk}, running ${versio
 const engine = String(payload?.engine ?? "");
 // A build that predates the engine field reports "" — say that plainly instead of
 // cascading into misleading guard failures.
-const engineKnown = engine === "kernel" || engine === "conductor";
+const engineKnown = ["kernel", "conductor", "session"].includes(engine);
 if (!engineKnown) {
   failures.push(`engine is ${JSON.stringify(engine)}: this build does not report an engine, so the process is running an older module — restart the Harness`);
 }
@@ -85,9 +85,9 @@ const tools = Array.isArray(payload?.tools) ? [...payload.tools] : [];
 // Exact equality would break as soon as aliases are registered, so demand the
 // canonical set and (for the conductor engine) the aliases as well.
 for (const expected of EXPECTED_TOOLS) check(tools.includes(expected), `missing tool ${expected}`);
-if (engine === "conductor") {
+if (engine === "conductor" || engine === "session") {
   for (const alias of ALIAS_TOOLS) check(tools.includes(alias), `missing legacy alias ${alias}`);
-  notes.push(`conductor engine: ${tools.length} tools (${EXPECTED_TOOLS.length} canonical + aliases)`);
+  notes.push(`${engine} engine: ${tools.length} tools (${EXPECTED_TOOLS.length} canonical + aliases)`);
 }
 check(payload?.installedAgents >= 1, `installedAgents must be >= 1, got ${String(payload?.installedAgents)}`);
 
@@ -95,7 +95,7 @@ check(payload?.installedAgents >= 1, `installedAgents must be >= 1, got ${String
 if (engine === "kernel") {
   check(payload?.teamService === true, "teamService must be true under the kernel engine (the Agent Teams bundle must be mounted)");
 } else {
-  check(payload?.teamService === false, "teamService must be false under the conductor engine (the kernel roster is disabled)");
+  check(payload?.teamService === false, `teamService must be false under the ${engine} engine (the kernel roster is disabled)`);
 }
 
 // Guard status vocabulary: `active` is the good state; `pending` retries on the
@@ -109,12 +109,12 @@ for (const [key, label] of engineKnown ? [["settlementGuard", "settlement-notice
     notes.push(`${label} reports "unavailable" — that value only exists in the first build, so the process predates the update`);
     continue;
   }
-  const acceptable = engine === "conductor"
+  const acceptable = engine === "conductor" || engine === "session"
     ? ["active", "pending", "disabled", "not-applicable"]
     : ["active", "pending", "disabled"];
   check(acceptable.includes(status), `${label} has unexpected status ${JSON.stringify(status)} (engine ${engine})`);
   if (status === "pending") notes.push(`${label} is pending; it retries on the next tool call`);
-  if (status === "not-applicable") notes.push(`${label} is not applicable under the conductor engine (nothing to wrap)`);
+  if (status === "not-applicable") notes.push(`${label} is not applicable under the ${engine} engine (nothing to wrap)`);
   if (status === "unsupported") failures.push(`${label} reports unsupported — the kernel shape changed (subagents.continuations?.activations)`);
   if (status === "failed") failures.push(`${label} reports failed — check the Harness log for the warning`);
 }

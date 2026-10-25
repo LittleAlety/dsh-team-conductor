@@ -1161,11 +1161,11 @@ await check("the console action route dispatches to the real tool", async () => 
   const route = routes.get(T.ACTION_ROUTE);
   assert.ok(route, "action route must be registered alongside the snapshot route");
 
-  const invoke = async (payload) => {
+  const invoke = async (payload, headers = {}) => {
     const listeners = new Map();
     const req = {
       method: "POST",
-      headers: {},
+      headers,
       on(event, callback) {
         listeners.set(event, callback);
         return req;
@@ -1197,6 +1197,13 @@ await check("the console action route dispatches to the real tool", async () => 
   const unknown = await invoke({ tool: "spawn_teammate", args: {} });
   assert.equal(unknown.statusCode, 400);
   assert.match(JSON.parse(unknown.body).reason, /unknown tool/);
+
+  const crossOrigin = await invoke({ tool: "team_task_add", args: { title: "bad" } }, { host: "127.0.0.1:3000", origin: "http://127.0.0.1:4000", "sec-fetch-site": "same-site" });
+  assert.equal(crossOrigin.statusCode, 403, "a different local origin must not mutate the board");
+  const remoteHost = await invoke({ tool: "team_task_add", args: { title: "bad" } }, { host: "evil.example:3000" });
+  assert.equal(remoteHost.statusCode, 403, "DNS rebinding hostnames are denied");
+  const sameOrigin = await invoke({ tool: "team_task_add", args: { title: "good" } }, { host: "127.0.0.1:3000", origin: "http://127.0.0.1:3000", "sec-fetch-site": "same-origin" });
+  assert.equal(sameOrigin.statusCode, 200);
 
   const wrongMethod = { statusCode: 0, headers: {}, setHeader() {}, end() {} };
   route.handler({ method: "GET", headers: {} }, wrongMethod);
@@ -1292,8 +1299,8 @@ await check("the conductor engine spawns and drains its own roster", async () =>
   assert.ok(overview.members.some((member) => member.target === "alpha"), "the conductor roster must list it");
   assert.equal(overview.team.capacity.used, 1);
 
-  // Model, both ways: chosen at spawn time (agentOptions) and switched later
-  // through sessionController.selectModel — the same seam the GUI uses.
+  // Spawn-time agentOptions can select a model; live switching a subagent via
+  // sessionController is unsupported by the host.
   const spawnedWithModel = await valueOf(add, {
     name: "beta",
     brief: "start",
@@ -1305,16 +1312,12 @@ await check("the conductor engine spawns and drains its own roster", async () =>
     "a model given at spawn time must reach agentOptions"
   );
   assert.equal(spawnedWithModel.engine, "conductor");
-  const switched = await valueOf(lead.__registered.get("team_member_edit"), {
+  await assert.rejects(() => valueOf(lead.__registered.get("team_member_edit"), {
     target: "alpha",
     action: "model",
     value: "deepseek-account/deepseek-v4"
-  });
-  assert.equal(selected.length, 1, "changing a member's model must call the session controller");
-  assert.equal(selected[0].sessionId, "child-1", "it must target the member's own session");
-  assert.equal(selected[0].provider, "deepseek-account");
-  assert.equal(selected[0].model, "deepseek-v4");
-  assert.ok(switched.effects.some((effect) => effect.includes("model switched")), "the switch must be reported");
+  }), /independent session engine/);
+  assert.equal(selected.length, 0, "subagent-owned sessions must not reach sessionController.selectModel");
   // A bare model name inherits the provider instead of inventing one.
   await valueOf(add, { name: "gamma", brief: "start", model: "deepseek-flash" });
   assert.deepEqual(spawned[2].spec.request.agentOptions, { model: "deepseek-flash" });
@@ -1384,6 +1387,15 @@ await check("the task board enforces dependencies, revisions and overlap warning
   assert.equal(first.task.revision, 1);
   assert.equal(first.task.status, "pending");
   const second = await call("team_task_add", { title: "second", deps: [first.task.id] });
+
+  await assert.rejects(
+    () => call("team_task_update", { task_id: first.task.id, action: "assign", owner: "ghost", expected_revision: first.task.revision }),
+    /not an active Team member/
+  );
+  await assert.rejects(
+    () => call("team_task_update", { task_id: second.task.id, action: "assign", owner: "lead", expected_revision: second.task.revision }),
+    /not an active Team member|blocked/
+  );
 
   // A blocked task cannot be claimed; the error names the blocker.
   await assert.rejects(
@@ -1593,12 +1605,12 @@ await check("a member conversation shows its Lead's team, not a team of its own"
   assert.equal(unknown.mismatch, true);
 });
 
-await check("auto-assign is on by default and can be turned off explicitly", () => {
+await check("auto-assign is opt-in", () => {
   // normalizeOptions(ctx, config) — the ctx comes first.
   const quiet = { logger: { info: () => {}, warn: () => {} } };
-  assert.equal(T.normalizeOptions(quiet, {}).autoAssign.enabled, true, "the dispatcher is on by default");
-  assert.equal(T.normalizeOptions(quiet, { autoAssign: {} }).autoAssign.enabled, true);
-  assert.equal(T.normalizeOptions(quiet, { autoAssign: { enabled: false } }).autoAssign.enabled, false, "explicit false still disables");
+  assert.equal(T.normalizeOptions(quiet, {}).autoAssign.enabled, false);
+  assert.equal(T.normalizeOptions(quiet, { autoAssign: {} }).autoAssign.enabled, false);
+  assert.equal(T.normalizeOptions(quiet, { autoAssign: { enabled: true } }).autoAssign.enabled, true);
 });
 
 await check("legacy kernel tool names forward to this plugin", async () => {
@@ -1754,6 +1766,205 @@ await check("new agents get the tools installed", () => {
   const outsider = makeAgent("outsider-1");
   created.callback({ agent: outsider });
   assert.equal(outsider.__registered.size, 0);
+});
+
+await check("conductor children receive tools from sidecar membership", async () => {
+  const root = makeAgent("membership-root");
+  const child = makeAgent("membership-child", { parent: root.id });
+  const live = [root];
+  const created = [];
+  const ctx = {
+    get: (name) => ({
+      agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+      subagents: { async startContinuable() { return { childId: child.id, messageId: "m" }; } },
+      tools: { register: () => () => {} },
+      systemPrompt: { section: () => () => {} }
+    })[name],
+    on: (event, callback) => { if (event === "agent/created") created.push(callback); return () => {}; },
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info() {}, warn() {} }
+  };
+  mod.apply(ctx, { delegationEngine: "conductor" });
+  const add = root.__registered.get("team_member_add");
+  assert.ok(add);
+  await add.execute({ name: "worker", brief: "work" }, { agent: root });
+  live.push(child);
+  created[0]({ agent: child });
+  assert.ok(child.__registered.has("team_task_list"), "the spawned child must receive team tools");
+  const result = await child.__registered.get("team_task_list").execute({}, { agent: child });
+  assert.ok(result);
+  const added = await root.__registered.get("team_task_add").execute({ title: "child task" }, { agent: root });
+  const task = typeof added?.text === "string" ? JSON.parse(added.text).task : added.task;
+  const claimed = await child.__registered.get("team_task_update").execute({ task_id: task.id, action: "claim", expected_revision: task.revision }, { agent: child });
+  const claimedTask = typeof claimed?.text === "string" ? JSON.parse(claimed.text).task : claimed.task;
+  assert.equal(claimedTask.owner, "worker", "child mutations use the roster name");
+});
+
+await check("task updates reject stale cancellation and invalid transitions", () => {
+  const root = "invariant-root";
+  const store = T.readStore(root);
+  const task = T.createTask(root, store, { title: "work" }, "lead");
+  assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "cancel", expectedRevision: 0 }, "lead"), /revision/);
+  assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "complete", expectedRevision: task.revision }, "stranger"), /owner|claim|assign/);
+  const claimed = T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "claim", expectedRevision: task.revision }, "worker");
+  assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "complete", expectedRevision: claimed.revision }, "stranger"), /owner|worker/);
+  const done = T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "complete", expectedRevision: claimed.revision }, "worker");
+  assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "assign", expectedRevision: done.revision, owner: "worker" }, "lead"), /done|completed/);
+});
+
+await check("dispatcher considers every live root", async () => {
+  const roots = [makeAgent("dispatch-root-a"), makeAgent("dispatch-root-b")];
+  const sent = [];
+  const services = {
+    agents: { list: () => roots, get: (id) => roots.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} }, systemPrompt: { section: () => () => {} },
+    subagents: {
+      async startContinuable(spec) { return { childId: `${spec.request.parent.id}-child`, messageId: "m" }; },
+      async sendMessage(_sender, id) { sent.push(id); return "m"; }
+    }
+  };
+  const ctx = { get: (name) => services[name], on: () => () => {}, effect: (factory) => { factory(); return () => {}; }, logger: { info() {}, warn() {} } };
+  const options = { delegationEngine: "conductor", autoAssign: { enabled: true, maxPerTick: 1 } };
+  mod.apply(ctx, options);
+  for (const root of roots) {
+    await root.__registered.get("team_member_add").execute({ name: "worker", brief: "work" }, { agent: root });
+    await root.__registered.get("team_task_add").execute({ title: "own task" }, { agent: root });
+  }
+  const result = await T.autoAssignTick(ctx, { options, stats: {} });
+  assert.equal(result.assigned, 2);
+  assert.deepEqual(new Set(sent), new Set(roots.map((root) => `${root.id}-child`)));
+});
+
+await check("terminal URL parsing stays on loopback and renders snapshots", async () => {
+  const { parseUrl, parseArgs, renderTeam, runCommand } = await import("../bin/dsh-team.js");
+  assert.equal(parseUrl("http://127.0.0.1:3000/").port, "3000");
+  const configuredUrl = process.env.DSH_TEAM_URL;
+  delete process.env.DSH_TEAM_URL;
+  try { assert.equal(parseArgs([]).url.port, "19387"); }
+  finally { if (configuredUrl === undefined) delete process.env.DSH_TEAM_URL; else process.env.DSH_TEAM_URL = configuredUrl; }
+  for (const bad of ["https://127.0.0.1:3000/", "http://evil.example:3000/", "http://127.0.0.1:3000/other", "http://user@localhost:3000/"]) {
+    assert.throws(() => parseUrl(bad), /loopback origin/);
+  }
+  assert.equal(parseArgs(["--session", "root", "--json", "team"]).session, "root");
+  assert.match(renderTeam({ teams: [{ root: "root", members: [{ target: "worker", availability: "idle-ready" }], board: { tasks: [{ id: "t1", status: "pending", title: "work" }] } }] }), /worker[\s\S]*t1/);
+  assert.deepEqual(parseArgs(["--help"]).command, ["help"]);
+  const oldFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), init });
+    return { ok: true, json: async () => seen.length === 1
+      ? { ok: true, teams: [{ root: "root", members: [{ target: "worker", role: "teammate" }], board: { tasks: [{ id: "t1", status: "pending", revision: 3 }] } }] }
+      : { ok: true, task: { id: "t1" } } };
+  };
+  try {
+    await runCommand(parseArgs(["--session", "root", "task", "assign", "t1", "worker"]));
+    assert.equal(JSON.parse(seen[1].init.body).args.owner, "worker");
+    assert.equal(JSON.parse(seen[1].init.body).args.expected_revision, 3);
+    assert.match(seen[0].url, /team\?session=root/);
+    seen.length = 0;
+    await runCommand(parseArgs(["--session", "root", "member", "model", "worker", "provider/model"]));
+    assert.deepEqual(JSON.parse(seen[1].init.body).args, { target: "worker", action: "model", value: "provider/model" });
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+await check("session engine creates independent sessions with team membership and model selection", async () => {
+  const root = makeAgent("session-root");
+  const member = makeAgent("session-independent"); // no parentSession link
+  const live = [root];
+  const calls = [];
+  const listeners = new Map();
+  const controller = {
+    async create(request) { calls.push(["create", request]); live.push(member); listeners.get("agent/created")?.({ agent: member }); return { sessionId: member.id }; },
+    async selectModel(request) { calls.push(["model", request]); },
+    async prompt(request, signal) { signal.throwIfAborted(); calls.push(["prompt", request]); return { requestId: request.requestId }; },
+    async cancel(request) { calls.push(["cancel", request]); }
+  };
+  const services = { agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) }, sessionController: controller,
+    workspaceRegistry: { list: () => [{ id: "workspace-a", sessionIds: [root.id] }] },
+    tools: { register: () => () => {} }, systemPrompt: { section: () => () => {} } };
+  const ctx = { get: (name) => services[name], on: (event, cb) => { listeners.set(event, cb); return () => {}; }, effect: (factory) => { factory(); return () => {}; }, logger: { info() {}, warn() {} } };
+  mod.apply(ctx, { delegationEngine: "session" });
+  const raw = await root.__registered.get("team_member_add").execute({ name: "analyst", brief: "Analyze", model: "provider/model" }, { agent: root });
+  const added = typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  assert.equal(added.member.id, member.id);
+  assert.equal(calls[0][0], "create");
+  assert.deepEqual(calls[0][1], { workspaceId: "workspace-a" }, "member joins Lead's workspace");
+  assert.equal(calls[1][0], "model");
+  assert.equal(calls[2][0], "prompt");
+  assert.equal(member.__registered.has("team_task_list"), true, "tool installation must happen after roster write");
+  const stored = T.readStore(root.id);
+  T.writeStore(root.id, { ...stored, members: { ...stored.members, legacy: { engine: "conductor", childId: "old-subagent" } } });
+  const snap = T.teamsSnapshot(ctx, member.id, T.normalizeOptions(ctx, { delegationEngine: "session" }));
+  assert.equal(snap.sessionId, root.id);
+  assert.equal(snap.teams[0].members.some((row) => row.target === "analyst"), true);
+  assert.equal(snap.teams[0].members.some((row) => row.target === "legacy"), false, "old subagents are not silently migrated");
+  assert.equal(snap.teams[0].capacity.engine, "session");
+  assert.equal(snap.teams[0].capacity.max, null);
+  live.splice(live.indexOf(root), 1);
+  assert.equal(T.membershipOf(ctx, member)?.role, "teammate", "membership persists while Lead is dormant");
+  assert.equal(T.membershipOf(ctx, member)?.root?.id, root.id);
+  await assert.rejects(() => member.__registered.get("team_member_add").execute({ name: "illegal" }, { agent: member }), /Lead-only/);
+  await member.__registered.get("team_task_list").execute({}, { agent: member });
+  live.unshift(root);
+  await root.__registered.get("team_message").execute({ target: "analyst", message: "Next task" }, { agent: root });
+  assert.equal(calls.at(-1)[0], "prompt");
+  assert.equal(calls.at(-1)[1].mode, "queue");
+  const taskRaw = await root.__registered.get("team_task_add").execute({ title: "auto session work" }, { agent: root });
+  const task = typeof taskRaw?.text === "string" ? JSON.parse(taskRaw.text).task : taskRaw.task;
+  const tick = await T.autoAssignTick(ctx, { options: { delegationEngine: "session", autoAssign: { enabled: true, maxPerTick: 1 } }, stats: {} });
+  assert.equal(tick.assigned, 1, "auto dispatcher must prompt a session using a valid signal");
+  assert.equal(T.readStore(root.id).tasks[task.id].owner, "analyst");
+  const edit = root.__registered.get("team_member_edit");
+  await edit.execute({ target: "analyst", action: "retire" }, { agent: root });
+  await assert.rejects(() => root.__registered.get("team_message").execute({ target: "analyst", message: "No" }, { agent: root }), /retired/);
+  await edit.execute({ target: "analyst", action: "restore" }, { agent: root });
+  await edit.execute({ target: "analyst", action: "interrupt" }, { agent: root });
+  assert.equal(calls.at(-1)[0], "cancel");
+  await root.__registered.get("team_member_delete").execute({ target: "analyst" }, { agent: root });
+  assert.equal(T.teamsSnapshot(ctx, root.id, T.normalizeOptions(ctx, { delegationEngine: "session" })).teams[0].members.some((row) => row.target === "analyst"), false);
+  assert.equal(T.membershipOf(ctx, member), undefined, "deleted session cannot become a new Lead");
+  await assert.rejects(() => root.__registered.get("team_message").execute({ target: member.id, message: "No" }, { agent: root }), /deleted/);
+});
+
+await check("conductor subagents cannot be model-switched through ordinary session controller", async () => {
+  const root = makeAgent("model-conductor-root");
+  let attempted = 0;
+  const services = {
+    agents: { list: () => [root], get: () => root },
+    sessionController: { async selectModel() { attempted += 1; throw new Error("subagent-owned session"); } },
+    tools: { register: () => () => {} }, systemPrompt: { section: () => () => {} },
+    subagents: { async startContinuable() { return { childId: "model-conductor-child", messageId: "m" }; } }
+  };
+  const ctx = { get: (name) => services[name], on: () => () => {}, effect: (factory) => { factory(); return () => {}; }, logger: { info() {}, warn() {} } };
+  mod.apply(ctx, { delegationEngine: "conductor" });
+  await root.__registered.get("team_member_add").execute({ name: "worker", brief: "work" }, { agent: root });
+  await assert.rejects(() => root.__registered.get("team_member_edit").execute({ target: "worker", action: "model", value: "provider/model" }, { agent: root }), /independent session|session engine/);
+  assert.equal(attempted, 0, "unsupported subagent sessions must never reach selectModel");
+});
+
+await check("failed session model selection leaves a retryable failed record", async () => {
+  const root = makeAgent("failed-model-root");
+  let failModel = true;
+  let creations = 0;
+  const controller = {
+    async create() { creations += 1; return { sessionId: creations === 1 ? "failed-model-session" : "retry-model-session" }; },
+    async selectModel() { if (failModel) throw new Error("model unavailable"); },
+    async prompt(_request, signal) { signal.throwIfAborted(); if (failModel) throw new Error("initial brief must not run after model failure"); }
+  };
+  const services = { agents: { list: () => [root], get: () => root }, sessionController: controller, tools: { register: () => () => {} }, systemPrompt: { section: () => () => {} } };
+  const ctx = { get: (name) => services[name], on: () => () => {}, effect: (factory) => { factory(); return () => {}; }, logger: { info() {}, warn() {} } };
+  mod.apply(ctx, { delegationEngine: "session" });
+  await assert.rejects(() => root.__registered.get("team_member_add").execute({ name: "retry", brief: "work", model: "bad/model" }, { agent: root }), /failed-model-session.*model selection failed/);
+  const store = T.readStore(root.id);
+  assert.equal(store.members.retry?.status, "failed");
+  assert.equal(store.members.retry?.model ?? null, null, "unapplied model must not be reported as selected");
+  assert.equal(T.teamsSnapshot(ctx, root.id, T.normalizeOptions(ctx, { delegationEngine: "session" })).teams[0].members.some((member) => member.target === "retry"), false);
+  failModel = false;
+  await root.__registered.get("team_member_add").execute({ name: "retry", brief: "work", model: "good/model" }, { agent: root });
+  const recovered = T.readStore(root.id);
+  assert.equal(recovered.members.retry.status, "active");
+  assert.equal(recovered.members.retry.model, "good/model");
+  assert.ok(Object.values(recovered.members).some((entry) => entry.childId === "failed-model-session" && entry.removedFrom === "retry"));
 });
 
 // ---------------------------------------------------------------------------
