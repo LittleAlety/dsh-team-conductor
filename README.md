@@ -718,6 +718,17 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 
 > 为什么只能靠 label：那个面板由内核的 `dsh-client-ui-subagent` 渲染，列的是当前会话的所有子会话，没有"按来源过滤/加来源徽章"的插槽；我们能控制的只有 spawn 时的 descriptor（`label`/`mode`/`provider`）。所以区分手段就是把标识写进 label，并把团队成员的权威视图放在本插件自己的面板（含 `availability` 与上下文压力）。
 
+### 成员不进项目区（唯一入口是面板）
+
+成员是**普通会话**，但它**不会**出现在侧栏的工作区/项目会话列表里：
+
+- 创建时**不挂载工作区**（`sessionController.create({ cwd })`，cwd 与 Lead 相同，所以文件工具仍指向同一个项目）；
+- 想让它出现在项目区可以显式开 `attachMembersToWorkspace: true`；
+- 进入路径只有一条：Lead 的 **Agent Team 面板** → 成员行的「打开会话」（`uiWorkspace.openSession(sessionId)` 按 id 直达，不需要工作区挂载）。
+
+> 为什么不挂工作区就能隐藏：项目区的会话列表由 `workspace.sessionIds`（挂载关系）驱动，不挂载就不在那一列里。
+> 顺带说明：如果你在会话列表里**手动删除**某个成员的会话，名册记录不会自动消失——它仍会出现在 `team_overview` 里，直到 `team_member_delete` 把记录归档（插件无法可靠得知一个已落盘的会话被删掉了）。
+
 ### 完成 → 审议的闭环
 
 成员做完任务**不是**自己宣布完成：

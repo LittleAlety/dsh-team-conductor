@@ -1949,7 +1949,7 @@ await check("session engine: interrupt, retire and delete act on the session, no
   const removed = await call(root, "team_member_delete", { target: "analyst" });
   assert.equal(removed.deleted.engine, "session");
   assert.ok(
-    removed.effects.some((effect) => effect.includes("history remain available")),
+    removed.effects.some((effect) => effect.includes("left untouched")),
     `the effect must say the conversation survives: ${JSON.stringify(removed.effects)}`
   );
   const afterDelete = T.readStore(root.id);
@@ -1983,7 +1983,13 @@ await check("session engine creates independent sessions with team membership an
   const added = typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
   assert.equal(added.member.id, member.id);
   assert.equal(calls[0][0], "create");
-  assert.deepEqual(calls[0][1], { workspaceId: "workspace-a" }, "member joins Lead's workspace");
+  // Members stay out of the project list by default: creating them BY workspace is
+  // what would make them show up there. Same cwd keeps their tools on the project.
+  assert.deepEqual(
+    calls[0][1],
+    { cwd: root.session.header.cwd },
+    "a member is created by cwd, not attached to the Lead's workspace"
+  );
   assert.equal(calls[1][0], "model");
   assert.equal(calls[2][0], "prompt");
   assert.equal(member.__registered.has("team_task_list"), true, "tool installation must happen after roster write");
@@ -2189,6 +2195,49 @@ await check("a member's completion notifies the Lead for review; the Lead's own 
   assert.equal(ownDone.task.status, "done", "the Lead's own task needs no second signature");
   assert.equal(prompts.length, 0, "no review request for the Lead's own work");
   assert.equal(sent.length, 0, "and nothing was delivered through the subagent channel either");
+});
+
+await check("members stay out of the project list unless explicitly attached", async () => {
+  // The workspace session list is driven by `workspace.sessionIds`, i.e. by
+  // attachment. Creating the member with `workspaceId` is what put it in the
+  // project's conversation list, so the default must create by cwd instead.
+  const calls = [];
+  const root = makeAgent("visibility-root");
+  const live = [root];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    sessionController: {
+      async create(request) { calls.push(request); return { sessionId: "visibility-member" }; },
+      async prompt() { return { accepted: true }; },
+      async rename() { return { title: "x" }; },
+      cancel() {},
+      async selectModel() { return { provider: "p", model: "m" }; }
+    },
+    workspaceRegistry: { list: () => [{ id: "workspace-a", sessionIds: [root.id] }] },
+    subagents: { async sendMessage() { return "m"; } }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+
+  // Default: no workspace attachment, and the result says where to open it.
+  mod.apply(ctx, { delegationEngine: "session" });
+  const raw = await root.__registered.get("team_member_add").execute({ name: "hidden-member", brief: "go" }, { agent: root });
+  const added = typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  assert.deepEqual(calls[0], { cwd: root.session.header.cwd }, "no workspaceId by default");
+  assert.equal(added.effects.some((effect) => effect.includes("kept out of the workspace session list")), true);
+
+  // Opt-in restores the old behaviour for anybody who wants members listed. The
+  // lookup is keyed on the CALLER's root, so this goes through the Lead again.
+  mod.apply(ctx, { delegationEngine: "session", attachMembersToWorkspace: true });
+  calls.length = 0;
+  await root.__registered.get("team_member_add").execute({ name: "listed-member", brief: "go" }, { agent: root });
+  assert.deepEqual(calls[0], { workspaceId: "workspace-a" }, "explicit opt-in attaches to the Lead's workspace");
 });
 
 await check("auto resolves the engine before the tool list is built, so aliases exist", async () => {
