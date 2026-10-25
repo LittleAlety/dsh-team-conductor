@@ -58,7 +58,18 @@ async function api(base, path, payload) {
 }
 
 const short = (value) => typeof value === "string" ? value.slice(0, 12) : "?";
-const label = (value, width) => String(value ?? "").padEnd(width).slice(0, width);
+/**
+ * Fixed-width cell. A truncated value gets an ellipsis instead of being cut
+ * mid-word, so a long member name never looks like a different, shorter one.
+ */
+const label = (value, width) => {
+  const full = String(value ?? "");
+  if (full.length <= width) return full.padEnd(width);
+  return `${full.slice(0, Math.max(0, width - 1))}…`;
+};
+
+/** Compact, unambiguous status words for the narrow status column. */
+const STATUS = { in_progress: "running", pending: "pending", done: "done" };
 
 export function renderTeam(snapshot) {
   const teams = snapshot?.teams ?? [];
@@ -67,13 +78,13 @@ export function renderTeam(snapshot) {
     const lines = [`TEAM ${team.root}  members ${team.capacity?.used ?? "?"}/${team.capacity?.max ?? "?"}`];
     lines.push("  MEMBERS");
     for (const member of team.members ?? []) {
-      lines.push(`  ${label(member.displayName ?? member.target ?? member.name, 22)} ${label(member.availability ?? member.status, 12)} ${member.contextPressure?.level ?? ""}`.trimEnd());
+      lines.push(`  ${label(member.displayName ?? member.target ?? member.name, 20)} ${label(member.availability ?? member.status, 11)} ${member.contextPressure?.level ?? ""}`.trimEnd());
     }
     if (!(team.members ?? []).length) lines.push("  (none)");
     lines.push("  TASKS");
     for (const task of team.board?.tasks ?? []) {
       const blocked = (task.blockedBy ?? []).length ? ` blocked: ${task.blockedBy.join(",")}` : "";
-      lines.push(`  ${label(task.id, 5)} ${label(task.status, 12)} ${label(task.owner ?? "-", 16)} ${task.title}${blocked}`);
+      lines.push(`  ${label(task.id, 5)} ${label(STATUS[task.status] ?? task.status, 9)} ${label(task.owner ?? "-", 14)} ${task.title}${blocked}`);
     }
     if (!(team.board?.tasks ?? []).length) lines.push("  (none)");
     return lines.join("\n");
