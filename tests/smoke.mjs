@@ -1527,6 +1527,80 @@ await check("the dispatcher hands a ready task to an idle member and rolls back 
   assert.doesNotMatch(JSON.stringify(sent.at(-1).content), /Claim it before starting/);
 });
 
+await check("a member conversation shows its Lead's team, not a team of its own", async () => {
+  // The panel is scoped by session id, and inside a member's conversation that id
+  // is the CHILD session. Matching it verbatim found no team and made every UI
+  // action fail with "no live Team member", so the child must resolve upwards.
+  const spawned = [];
+  const lead = makeAgent("root-lead");
+  const child = makeAgent("child-session-1", { parent: "root-lead" });
+  const live = [lead, child];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    subagents: {
+      async startContinuable(spec) {
+        spawned.push(spec);
+        return { childId: "child-session-1", messageId: "m" };
+      },
+      async drainContinuableChildren() {},
+      async sendMessage() {
+        return "m";
+      }
+    }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => {
+      factory();
+      return () => {};
+    },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  const options = { delegationEngine: "conductor" };
+  mod.apply(ctx, options);
+  const call = async (name, args) => {
+    const raw = await lead.__registered.get(name).execute(args, { agent: lead });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+  await call("team_member_add", { name: "alpha", brief: "work" });
+
+  // Asked with the child id, the snapshot answers with the Lead's team.
+  const opts = T.normalizeOptions(ctx, options);
+  const viaChild = T.teamsSnapshot(ctx, "child-session-1", opts);
+  assert.equal(viaChild.teams.length, 1, "the child must resolve to its Lead's team");
+  assert.equal(viaChild.sessionId, "root-lead", "sessionId reports the Team root");
+  assert.equal(viaChild.requestedSessionId, "child-session-1");
+  assert.equal(viaChild.resolvedFrom, "live");
+  assert.equal(viaChild.mismatch, false);
+  assert.equal(viaChild.teams[0].members.some((member) => member.target === "alpha"), true, `the roster must list alpha: ${JSON.stringify(viaChild.teams[0].members.map((member) => member.target))}`);
+
+  // UI actions issued from the child conversation target the Lead.
+  assert.equal(T.pickCaller(ctx, "child-session-1")?.id, "root-lead");
+
+  // A dormant member is not a live agent: the sidecar still knows its child id.
+  live.length = 0;
+  live.push(lead);
+  const viaSidecar = T.teamsSnapshot(ctx, "child-session-1", opts);
+  assert.equal(viaSidecar.resolvedFrom, "sidecar", "the roster record is the fallback");
+  assert.equal(viaSidecar.teams.length, 1);
+
+  // An unknown session stays a honest mismatch instead of borrowing another team.
+  const unknown = T.teamsSnapshot(ctx, "not-a-session", opts);
+  assert.equal(unknown.teams.length, 0);
+  assert.equal(unknown.mismatch, true);
+});
+
+await check("auto-assign is on by default and can be turned off explicitly", () => {
+  // normalizeOptions(ctx, config) — the ctx comes first.
+  const quiet = { logger: { info: () => {}, warn: () => {} } };
+  assert.equal(T.normalizeOptions(quiet, {}).autoAssign.enabled, true, "the dispatcher is on by default");
+  assert.equal(T.normalizeOptions(quiet, { autoAssign: {} }).autoAssign.enabled, true);
+  assert.equal(T.normalizeOptions(quiet, { autoAssign: { enabled: false } }).autoAssign.enabled, false, "explicit false still disables");
+});
+
 await check("legacy kernel tool names forward to this plugin", async () => {
   // Prompts, skills and older docs still say spawn_teammate / send_message /
   // team_task_create. Registering those names as aliases means such a reference

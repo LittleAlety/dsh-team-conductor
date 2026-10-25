@@ -658,7 +658,7 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 - id: team-conductor
   config:
     autoAssign:
-      enabled: true      # 默认 false（每次派活都要唤醒成员，花钱）
+      enabled: true      # v0.6.1 起默认 true；每次派活都要唤醒成员（花钱），介意就写 false
       intervalMs: 15000  # 3s..600s
       maxPerTick: 1      # 1..5
 ```
@@ -671,6 +671,15 @@ node scripts/verify-live.mjs      # 断言**运行中的进程**确实是这一�
 - **先 CAS 认领，再唤醒**：先按 revision 标成 `in_progress`，再给成员发认领简报；**唤醒失败就回滚认领**，不留"挂着 in_progress 但没人知道"的僵尸任务。
 
 每次派发在任务的 `assignedBy` 上留 `auto`，便于区分人工与自动。
+
+### 面板永远显示 Lead 的团队（不是成员会话自己的）
+
+每个顶层会话都是一支团队，而**成员会话本身是一个子会话**。面板是按 session id 取数据的，在成员的对话里那个 id 是**子会话 id**——早期实现按它精确匹配，于是面板空白、UI 操作还会报 `no live Team member`。现在宿主先把任意 session 解析回它的 **Team root** 再匹配：
+
+- `/team?session=<子会话 id>` 返回该成员的 **Lead 的团队**，并多带三个字段：`sessionId`（解析出的 root）、`requestedSessionId`（你请求的）、`resolvedFrom`（`live`=通过 live agent 的 `parentSession` 走上去，`sidecar`=成员不在线时从侧车记录的 `childId` 反查）；
+- `/action` 的 `session` 同样先解析，所以在成员对话里点按钮，操作的是 Lead 的团队；
+- 客户端据此匹配团队，并在顶部显示一行提示「这是成员会话，显示其所属 Lead 的团队（<root 前 8 位>）」；
+- 真正未知的会话仍然返回空 + `mismatch: true`，不会借用别的团队。
 
 ### 团队成员 vs 一次性子代理（面板里怎么分）
 
