@@ -718,6 +718,17 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 
 > 为什么只能靠 label：那个面板由内核的 `dsh-client-ui-subagent` 渲染，列的是当前会话的所有子会话，没有"按来源过滤/加来源徽章"的插槽；我们能控制的只有 spawn 时的 descriptor（`label`/`mode`/`provider`）。所以区分手段就是把标识写进 label，并把团队成员的权威视图放在本插件自己的面板（含 `availability` 与上下文压力）。
 
+### 完成 → 审议的闭环
+
+成员做完任务**不是**自己宣布完成：
+
+1. 成员调用 `team_task_update(action="complete", report="做了什么、怎么验证的")`；
+2. 任务进入 **`review`** 状态，插件**自动把报告发给 Lead**（`report` + 完成标准 + 通过/退回的命令），不需要成员另外 `team_message`；
+3. **只有 Lead 能 `approve`**：任务转 `done`，记录 `approvedBy/approvedAt`。不满意就 `reject` 并写 `review_note`——任务退回 `in_progress`、清空完成戳，原负责人重做；
+4. Lead 自己做的任务 `complete` 直接 `done`，不产生审议请求（它上面没有人）。
+
+`assign` 在 `review` 状态下会被拒绝（待审议的任务不能被改派）。
+
 ### 任务板条目长什么样
 
 写任务时请写详细——看板是给人看的工作面，不是一串标题：

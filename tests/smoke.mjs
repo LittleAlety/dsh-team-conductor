@@ -1813,8 +1813,18 @@ await check("task updates reject stale cancellation and invalid transitions", ()
   assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "complete", expectedRevision: task.revision }, "stranger"), /owner|claim|assign/);
   const claimed = T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "claim", expectedRevision: task.revision }, "worker");
   assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "complete", expectedRevision: claimed.revision }, "stranger"), /owner|worker/);
-  const done = T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "complete", expectedRevision: claimed.revision }, "worker");
-  assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "assign", expectedRevision: done.revision, owner: "worker" }, "lead"), /done|completed/);
+  const submitted = T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "complete", expectedRevision: claimed.revision }, "worker");
+  assert.equal(submitted.status, "review", "a member's completion goes to review");
+  assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "assign", expectedRevision: submitted.revision, owner: "worker" }, "lead"), /review|done/);
+  assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "reject", expectedRevision: submitted.revision }, "lead"), /review_note/);
+  const rejected = T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "reject", expectedRevision: submitted.revision, review_note: "missing p95" }, "lead");
+  assert.equal(rejected.status, "in_progress", "rejection sends the work back to the owner");
+  assert.equal(rejected.reviewNote, "missing p95");
+  assert.equal(rejected.completedAt, null);
+  const done = T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "complete", expectedRevision: rejected.revision }, "worker");
+  const approved = T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "approve", expectedRevision: done.revision }, "lead");
+  assert.equal(approved.status, "done");
+  assert.throws(() => T.mutateTask(root, T.readStore(root), { taskId: task.id, action: "assign", expectedRevision: approved.revision, owner: "worker" }, "lead"), /done/);
 });
 
 await check("dispatcher considers every live root", async () => {
@@ -2069,15 +2079,28 @@ await check("task board records who claimed a task, when, and how", async () => 
   assert.equal(task.ownerSessionId, "board-member-session", "the board points at the member's conversation");
 
   // Completing records who finished it.
-  T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "complete", expectedRevision: task.revision }, "analyst");
+  T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "complete", expectedRevision: task.revision, report: "table below" }, "analyst");
   board = await call("team_task_list", {});
   task = board.tasks.find((entry) => entry.id === task.id);
-  assert.equal(task.status, "done");
+  assert.equal(task.status, "review", "a member's completion is a submission, not a verdict");
   assert.equal(task.completedBy, "analyst");
   assert.equal(typeof task.completedAt, "string");
+  assert.equal(typeof task.reviewRequestedAt, "string");
+  assert.equal(task.report, "table below");
+  assert.throws(
+    () => T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "approve", expectedRevision: task.revision }, "analyst"),
+    /only the Lead can approve/,
+    "a member cannot approve its own work"
+  );
+  // The Lead approves -> done.
+  T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "approve", expectedRevision: task.revision, review_note: "checked" }, "lead");
+  const approved = (await call("team_task_list", {})).tasks.find((entry) => entry.id === task.id);
+  assert.equal(approved.status, "done");
+  assert.equal(approved.approvedBy, "lead");
+  assert.equal(approved.reviewNote, "checked");
 
   // Reopen + release must clear the claim stamps, or the board would lie.
-  T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "reopen", expectedRevision: task.revision }, "lead");
+  T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "reopen", expectedRevision: approved.revision }, "lead");
   const reopened = (await call("team_task_list", {})).tasks.find((entry) => entry.id === task.id);
   assert.equal(reopened.completedAt, null, "reopening clears the completion stamp");
   T.mutateTask(root.id, T.readStore(root.id), { taskId: task.id, action: "release", expectedRevision: reopened.revision }, "analyst");
@@ -2092,6 +2115,80 @@ await check("task board records who claimed a task, when, and how", async () => 
   T.mutateTask(root.id, T.readStore(root.id), { taskId: second.task.id, action: "claim", expectedRevision: second.task.revision, assignedBy: "auto" }, "analyst");
   const auto = (await call("team_task_list", {})).tasks.find((entry) => entry.id === second.task.id);
   assert.equal(auto.claimKind, "auto", "dispatch claims are marked auto");
+});
+
+await check("a member's completion notifies the Lead for review; the Lead's own work does not", async () => {
+  const prompts = [];
+  const sent = [];
+  const lead = makeAgent("review-lead");
+  const member = makeAgent("review-member-session");
+  const live = [lead, member];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    sessionController: {
+      async create() { return { sessionId: "review-member-session" }; },
+      async prompt(request) { prompts.push(request); return { accepted: true }; },
+      async rename() { return { title: "x" }; },
+      cancel() {},
+      async selectModel() { return { provider: "p", model: "m" }; }
+    },
+    workspaceRegistry: { list: () => [] },
+    subagents: { async sendMessage(_sender, id, content) { sent.push({ id, content }); return "m"; } }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, { delegationEngine: "session" });
+  const call = async (agent, name, args) => {
+    const raw = await agent.__registered.get(name).execute(args, { agent });
+    return typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
+  };
+
+  await call(lead, "team_member_add", { name: "analyst", brief: "go" });
+  const added = await call(lead, "team_task_add", { title: "latency table", acceptance: "p50+p95 per endpoint" });
+  // The member claims it itself.
+  T.mutateTask(lead.id, T.readStore(lead.id), { taskId: added.task.id, action: "claim", expectedRevision: added.task.revision }, "analyst");
+  const claimed = (await call(lead, "team_task_list", {})).tasks.find((entry) => entry.id === added.task.id);
+
+  prompts.length = 0;
+  const submitted = await call(member, "team_task_update", {
+    task_id: added.task.id,
+    action: "complete",
+    expected_revision: claimed.revision,
+    report: "table in work/latency.md"
+  });
+
+  assert.equal(submitted.task.status, "review", "the submission waits for review");
+  assert.equal(prompts.length, 1, "the Lead must be notified exactly once");
+  assert.equal(prompts[0].sessionId, lead.id, "the notice goes to the Lead's own conversation");
+  const notice = JSON.stringify(prompts[0].content);
+  assert.match(notice, /请审议/, "the Lead is asked to review, not just told");
+  assert.match(notice, /table in work\/latency\.md/, "the member's report travels with the request");
+  assert.match(notice, new RegExp(`approve`), "the notice names the approve call");
+  assert.ok(submitted.effects.some((effect) => effect.includes("review request delivered")), "the tool reports the delivery");
+
+  // The Lead approving is what finishes it; approving twice must fail.
+  const approved = await call(lead, "team_task_update", { task_id: added.task.id, action: "approve", expected_revision: submitted.task.revision });
+  assert.equal(approved.task.status, "done");
+  await assert.rejects(
+    () => call(lead, "team_task_update", { task_id: added.task.id, action: "approve", expected_revision: approved.task.revision }),
+    /not waiting for review/
+  );
+
+  // The Lead finishing a task of its own skips review and sends nothing.
+  const own = await call(lead, "team_task_add", { title: "lead-only chore" });
+  T.mutateTask(lead.id, T.readStore(lead.id), { taskId: own.task.id, action: "claim", expectedRevision: own.task.revision }, "lead");
+  const ownClaimed = (await call(lead, "team_task_list", {})).tasks.find((entry) => entry.id === own.task.id);
+  prompts.length = 0;
+  const ownDone = await call(lead, "team_task_update", { task_id: own.task.id, action: "complete", expected_revision: ownClaimed.revision });
+  assert.equal(ownDone.task.status, "done", "the Lead's own task needs no second signature");
+  assert.equal(prompts.length, 0, "no review request for the Lead's own work");
+  assert.equal(sent.length, 0, "and nothing was delivered through the subagent channel either");
 });
 
 await check("auto picks the session engine when the composition can create sessions", async () => {
