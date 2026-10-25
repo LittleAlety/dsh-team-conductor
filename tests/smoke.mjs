@@ -1486,6 +1486,45 @@ await check("the dispatcher hands a ready task to an idle member and rolls back 
   const rolled = board.tasks.find((entry) => entry.id === task2.task.id);
   assert.equal(rolled.status, "pending", "the claim must be released when the member cannot be woken");
   assert.equal(rolled.owner, null);
+
+  // --- "做完一个任务后会不会自动接下一个" ---
+  // Delivery is back. The worker still owns t1 (in_progress) and its turn has
+  // ended, so a naive dispatcher would hand it t2 immediately: board-level busy
+  // must prevent that, otherwise work stacks on a half-done task.
+  failSend = false;
+  const whileBusy = await T.autoAssignTick(ctx, state);
+  assert.equal(whileBusy.assigned, 0, "a member that still owns an unfinished task is not free");
+  const stillPending = (await call("team_task_list", {})).tasks.find((entry) => entry.id === task2.task.id);
+  assert.equal(stillPending.status, "pending");
+  assert.equal(stillPending.owner, null);
+
+  // The member finishes t1 the way the brief tells it to: complete it. (The claim
+  // half must be a no-op — the dispatcher already claimed it in this member's name.)
+  const list = await call("team_task_list", {});
+  const t1 = list.tasks.find((entry) => entry.id === "t1");
+  // The member's own claim is a no-op (the dispatcher already claimed it for them).
+  // `by` is the caller identity, so this is checked as the member, not as the Lead.
+  const reclaimed = T.mutateTask(lead.id, T.readStore(lead.id), { taskId: "t1", action: "claim", expectedRevision: t1.revision }, "worker");
+  assert.equal(reclaimed.owner, "worker", "re-claiming as the current owner is a no-op, not an error");
+  // The Lead still may not steal a task owned by a member — that stays an error.
+  assert.throws(
+    () => T.mutateTask(lead.id, T.readStore(lead.id), { taskId: "t1", action: "claim", expectedRevision: reclaimed.revision }, "lead"),
+    /is owned by "worker"/,
+    "claiming someone else's task must still be refused"
+  );
+  await call("team_task_update", { task_id: "t1", action: "complete", expected_revision: reclaimed.revision });
+
+  // Now the worker is free again, and the next tick hands it the next task.
+  const next = await T.autoAssignTick(ctx, state);
+  assert.equal(next.assigned, 1, "once the previous task is done the member picks up the next one");
+  const board2 = await call("team_task_list", {});
+  const t2 = board2.tasks.find((entry) => entry.id === task2.task.id);
+  assert.equal(t2.owner, "worker");
+  assert.equal(t2.assignedBy, "auto");
+  assert.equal(state.stats.autoAssigned, 2, "two tasks were handed out by the dispatcher");
+  // The brief must not ask for a claim that would now throw (owner !== null).
+  assert.match(JSON.stringify(sent.at(-1).content), /already claimed in your name/);
+  assert.doesNotMatch(JSON.stringify(sent.at(-1).content), /Claim it before starting/);
 });
 
 await check("legacy kernel tool names forward to this plugin", async () => {
