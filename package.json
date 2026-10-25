@@ -1,6 +1,6 @@
 {
   "name": "dsh-team-conductor",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Unified control plane for DeepSeek Harness Agent Teams: one overview of the roster with per-member context pressure, member editing (alias/description/priority/tags/token budget/re-brief/retire/restore/compact/interrupt) plus member add/delete, runtime capacity control, a message path that reaches non-roster continuable subagents by id, and a duplicate settlement-notice guard.",
   "type": "module",
   "main": "lib/index.js",
