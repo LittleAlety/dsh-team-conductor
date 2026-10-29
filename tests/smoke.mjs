@@ -2341,13 +2341,21 @@ await check("the team shares one model by default; sync can be turned off", asyn
   assert.deepEqual(calls, [["sync-member", "own", "model-c"]], "sync off: only the target switches");
 });
 
-await check("members stay out of the project list unless explicitly attached", async () => {
-  // The workspace session list is driven by `workspace.sessionIds`, i.e. by
-  // attachment. Creating the member with `workspaceId` is what put it in the
-  // project's conversation list, so the default must create by cwd instead.
+await check("members are filed under their own workspace so the sidebar stays tidy", async () => {
+  // The sidebar lists EVERY session and files the ones attached to no workspace
+  // under "ungrouped" (dsh-client-ui-workspace: groupByWorkspace). So "do not
+  // attach" does not hide anything — members must go into one dedicated folder.
   const calls = [];
+  const attached = [];
   const root = makeAgent("visibility-root");
   const live = [root];
+  const dedicated = {
+    id: "workspace-team",
+    title: "Agent Team",
+    path: "C:/Users/x/.dsh/agent-team-members",
+    sessionIds: [],
+    async attachSession(id) { attached.push(id); this.sessionIds.push(id); }
+  };
   const services = {
     agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
     tools: { register: () => () => {} },
@@ -2359,7 +2367,11 @@ await check("members stay out of the project list unless explicitly attached", a
       cancel() {},
       async selectModel() { return { provider: "p", model: "m" }; }
     },
-    workspaceRegistry: { list: () => [{ id: "workspace-a", sessionIds: [root.id] }] },
+    workspaceRegistry: {
+      list: () => [dedicated],
+      async create(path, title) { throw new Error(`must not create (${path}/${title})`); },
+      get: () => undefined
+    },
     subagents: { async sendMessage() { return "m"; } }
   };
   const ctx = {
@@ -2369,19 +2381,44 @@ await check("members stay out of the project list unless explicitly attached", a
     logger: { info: () => {}, warn: () => {} }
   };
 
-  // Default: no workspace attachment, and the result says where to open it.
+  // Default: created by cwd (its file tools stay on the project) and then filed
+  // into the dedicated workspace (one collapsible folder, not a row per member).
   mod.apply(ctx, { delegationEngine: "session" });
   const raw = await root.__registered.get("team_member_add").execute({ name: "hidden-member", brief: "go" }, { agent: root });
   const added = typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
-  assert.deepEqual(calls[0], { cwd: root.session.header.cwd }, "no workspaceId by default");
-  assert.equal(added.effects.some((effect) => effect.includes("kept out of the workspace session list")), true);
+  assert.deepEqual(calls[0], { cwd: root.session.header.cwd }, "created by cwd, not by workspaceId");
+  assert.deepEqual(attached, ["visibility-member"], "attached to the dedicated workspace");
+  assert.equal(added.effects.some((effect) => effect.includes("Agent Team") && effect.includes("workspace")), true, "the effect names the folder");
 
-  // Opt-in restores the old behaviour for anybody who wants members listed. The
-  // lookup is keyed on the CALLER's root, so this goes through the Lead again.
-  mod.apply(ctx, { delegationEngine: "session", attachMembersToWorkspace: true });
-  calls.length = 0;
+  // mode "lead" files them into the Lead's workspace instead (opt-in listing).
+  const leadWs = { id: "workspace-a", title: "project", sessionIds: [root.id], async attachSession(id) { attached.push(id); } };
+  services.workspaceRegistry = { list: () => [leadWs], async create() { throw new Error("must not create"); } };
+  mod.apply(ctx, { delegationEngine: "session", memberWorkspace: "lead" });
+  attached.length = 0;
   await root.__registered.get("team_member_add").execute({ name: "listed-member", brief: "go" }, { agent: root });
-  assert.deepEqual(calls[0], { workspaceId: "workspace-a" }, "explicit opt-in attaches to the Lead's workspace");
+  assert.deepEqual(attached, ["visibility-member"], "lead mode attaches to the Lead's workspace");
+
+  // mode "none" leaves them unattached (they land in the ungrouped bucket).
+  mod.apply(ctx, { delegationEngine: "session", memberWorkspace: "none" });
+  attached.length = 0;
+  await root.__registered.get("team_member_add").execute({ name: "loose-member", brief: "go" }, { agent: root });
+  assert.deepEqual(attached, [], "none mode attaches nothing");
+
+  // A roster read adopts members created before this change, idempotently. The
+  // dedicated workspace is put back and emptied, so the adoption really attaches.
+  services.workspaceRegistry = { list: () => [dedicated], async create() { throw new Error("must not create"); } };
+  dedicated.sessionIds.length = 0;
+  mod.apply(ctx, { delegationEngine: "session" });
+  attached.length = 0;
+  const overview = await root.__registered.get("team_overview").execute({ include_pressure: false }, { agent: root });
+  const payload = typeof overview?.text === "string" ? JSON.parse(overview.text) : overview;
+  assert.equal(payload.memberWorkspace?.adopted >= 1, true, "team_overview reports how many members it filed");
+  assert.equal(attached.length >= 1, true, "and actually attaches them");
+
+  // Second read is a no-op: everything is already filed.
+  attached.length = 0;
+  await root.__registered.get("team_overview").execute({ include_pressure: false }, { agent: root });
+  assert.deepEqual(attached, [], "a second read attaches nothing new");
 });
 
 await check("auto resolves the engine before the tool list is built, so aliases exist", async () => {

@@ -718,15 +718,19 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 
 > 为什么只能靠 label：那个面板由内核的 `dsh-client-ui-subagent` 渲染，列的是当前会话的所有子会话，没有"按来源过滤/加来源徽章"的插槽；我们能控制的只有 spawn 时的 descriptor（`label`/`mode`/`provider`）。所以区分手段就是把标识写进 label，并把团队成员的权威视图放在本插件自己的面板（含 `availability` 与上下文压力）。
 
-### 成员不进项目区（唯一入口是面板）
+### 成员收在一个「Agent Team」文件夹里（入口仍是面板）
 
-成员是**普通会话**，但它**不会**出现在侧栏的工作区/项目会话列表里：
+成员是**普通会话**。普通会话无法被侧栏隐藏，只能被**归属**：侧栏列出全部会话，再把它们分派给工作区，**没被任何工作区认领的统一归进「未分组」**（`dsh-client-ui-workspace` 的 `groupByWorkspace()`；DSH 删除工作区时提示"其会话将显示在未分组下"就是这个机制）。所以：
 
-- 创建时**不挂载工作区**（`sessionController.create({ cwd })`，cwd 与 Lead 相同，所以文件工具仍指向同一个项目）；
-- 想让它出现在项目区可以显式开 `attachMembersToWorkspace: true`；
-- 进入路径只有一条：Lead 的 **Agent Team 面板** → 成员行的「打开会话」（`uiWorkspace.openSession(sessionId)` 按 id 直达，不需要工作区挂载）。
+- **默认（`memberWorkspace: "dedicated"`）**：成员被挂进一个专用工作区，标题 `Agent Team`、目录 `$DSH_HOME/agent-team-members`（首次创建成员时自动建）。侧栏里它是一个**可折叠文件夹**，不是十几个散落的未分组行。
+- 创建时仍用 `sessionController.create({ cwd })`（cwd 与 Lead 相同），所以成员的文件工具指向**你的项目**，而不是那个空目录。
+- `memberWorkspace: "lead"` → 挂到 Lead 的工作区，成员出现在项目列表里（旧的 `attachMembersToWorkspace: true` 等价于这个）。
+- `memberWorkspace: "none"` → 谁也不挂，成员就会落在「未分组」。
+- 改名/改路径：`memberWorkspaceTitle`、`memberWorkspacePath`。
+- **旧成员自动收编**：`team_overview` 与面板轮询（`/team`）会把该团队里所有 session 成员补挂进这个工作区（幂等，第二次是空操作），所以你不用手动迁移。
+- 入口仍是 Lead 的 **Agent Team 面板** → 成员行的「打开会话」（`uiWorkspace.openSession(sessionId)` 按 id 直达）。
 
-> 为什么不挂工作区就能隐藏：项目区的会话列表由 `workspace.sessionIds`（挂载关系）驱动，不挂载就不在那一列里。
+> 为什么不用"更彻底"的隐藏：侧栏只对 `header.origin === "subagent"` 的会话与**已归档**会话不显示。前者会让成员变成子代理血统——卸载后**不能按会话 id 唤醒**（`subagent Sessions require their durable parent address`），等于废掉 v1.0 的"成员＝普通会话"；后者会让 `archived-session-gate` 拒掉该会话的每一次 `agent/pre-step`，成员根本不能干活。所以"一个专用文件夹"是唯一既不牺牲能力、又不制造噪音的方案。
 > 顺带说明：如果你在会话列表里**手动删除**某个成员的会话，名册记录不会自动消失——它仍会出现在 `team_overview` 里，直到 `team_member_delete` 把记录归档（插件无法可靠得知一个已落盘的会话被删掉了）。
 
 ### availability 的每个值都有意思
