@@ -2347,6 +2347,7 @@ await check("members are filed under their own workspace so the sidebar stays ti
   // attach" does not hide anything — members must go into one dedicated folder.
   const calls = [];
   const attached = [];
+  const titles = [];
   const root = makeAgent("visibility-root");
   const live = [root];
   const dedicated = {
@@ -2363,7 +2364,7 @@ await check("members are filed under their own workspace so the sidebar stays ti
     sessionController: {
       async create(request) { calls.push(request); return { sessionId: "visibility-member" }; },
       async prompt() { return { accepted: true }; },
-      async rename() { return { title: "x" }; },
+      async rename(request) { titles.push(request.title); return { title: request.title }; },
       cancel() {},
       async selectModel() { return { provider: "p", model: "m" }; }
     },
@@ -2387,6 +2388,7 @@ await check("members are filed under their own workspace so the sidebar stays ti
   const raw = await root.__registered.get("team_member_add").execute({ name: "hidden-member", brief: "go" }, { agent: root });
   const added = typeof raw?.text === "string" ? JSON.parse(raw.text) : raw;
   assert.deepEqual(calls[0], { cwd: root.session.header.cwd }, "created by cwd, not by workspaceId");
+  assert.deepEqual(titles, ["Agent Team · hidden-member · visibili"], "the session title names the Lead");
   assert.deepEqual(attached, ["visibility-member"], "attached to the dedicated workspace");
   assert.equal(added.effects.some((effect) => effect.includes("Agent Team") && effect.includes("workspace")), true, "the effect names the folder");
 
@@ -2408,17 +2410,26 @@ await check("members are filed under their own workspace so the sidebar stays ti
   // dedicated workspace is put back and emptied, so the adoption really attaches.
   services.workspaceRegistry = { list: () => [dedicated], async create() { throw new Error("must not create"); } };
   dedicated.sessionIds.length = 0;
+  // Simulate a member created by an older build: no Lead stamped into the title.
+  const legacy = T.readStore(root.id);
+  for (const key of Object.keys(legacy.members)) delete legacy.members[key].titleLead;
+  T.writeStore(root.id, legacy);
   mod.apply(ctx, { delegationEngine: "session" });
   attached.length = 0;
+  titles.length = 0;
   const overview = await root.__registered.get("team_overview").execute({ include_pressure: false }, { agent: root });
   const payload = typeof overview?.text === "string" ? JSON.parse(overview.text) : overview;
   assert.equal(payload.memberWorkspace?.adopted >= 1, true, "team_overview reports how many members it filed");
   assert.equal(attached.length >= 1, true, "and actually attaches them");
+  assert.equal(payload.memberWorkspace?.titled >= 1, true, "and re-titles them with the Lead");
+  assert.equal(titles.every((title) => title.endsWith("· visibili")), true, `titles name the Lead: ${JSON.stringify(titles)}`);
 
-  // Second read is a no-op: everything is already filed.
+  // Second read is a no-op: everything is already filed and titled.
   attached.length = 0;
+  titles.length = 0;
   await root.__registered.get("team_overview").execute({ include_pressure: false }, { agent: root });
   assert.deepEqual(attached, [], "a second read attaches nothing new");
+  assert.deepEqual(titles, [], "a second read renames nothing");
 });
 
 await check("auto resolves the engine before the tool list is built, so aliases exist", async () => {

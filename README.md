@@ -723,6 +723,7 @@ Agent Team · <名字>        mode: continuable     ← 团队成员
 成员是**普通会话**。普通会话无法被侧栏隐藏，只能被**归属**：侧栏列出全部会话，再把它们分派给工作区，**没被任何工作区认领的统一归进「未分组」**（`dsh-client-ui-workspace` 的 `groupByWorkspace()`；DSH 删除工作区时提示"其会话将显示在未分组下"就是这个机制）。所以：
 
 - **默认（`memberWorkspace: "dedicated"`）**：成员被挂进一个专用工作区，标题 `Agent Team`、目录 `$DSH_HOME/agent-team-members`（首次创建成员时自动建）。侧栏里它是一个**可折叠文件夹**，不是十几个散落的未分组行。
+- **标题带 Lead**：因为这个文件夹是**所有团队共用**的，成员会话标题写成 `Agent Team · <名字> · <lead 短 id>`，一眼能看出是谁的成员。旧成员不必手工改：`team_overview`／面板轮询会把缺 Lead 的标题补上（只在侧车没记 `titleLead` 时重命名一次，失败下次再试）。
 - 创建时仍用 `sessionController.create({ cwd })`（cwd 与 Lead 相同），所以成员的文件工具指向**你的项目**，而不是那个空目录。
 - `memberWorkspace: "lead"` → 挂到 Lead 的工作区，成员出现在项目列表里（旧的 `attachMembersToWorkspace: true` 等价于这个）。
 - `memberWorkspace: "none"` → 谁也不挂，成员就会落在「未分组」。
