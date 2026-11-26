@@ -92,6 +92,21 @@ dsh plugin --profile desktop add "file:C:/Users/Little Alety/Documents/deepseek-
 
 插件在每次组合装载时：为每个 live Team 成员（Lead 与 teammate）的 agent scope 注册九个工具 + 一个 prompt 段，并（在服务可用时）安装两个守卫——结算通知去重（装在激活注册表上）与已删成员消息拦截（装在 `agentTeams.sendMessage` 上）。工具只在 Team 成员的 scope 上注册——非成员 agent 看不到它们。
 
+## 与 DSH 0.2.2 的兼容（1.8.0）
+
+DSH 0.2.2-rc.5 把 **Team 并入了 subagent 体系**（内核升级指南 `docs/upgrade-guide/v0.2.1-rc.2/agent-team-subagents`）：`ctx.agentTeams` 移除了创建/消息/中断/名册/成员判定 API，`spawn_teammate`、Team 版 `send_message`/`list_agents`/`interrupt_agent` 也被删除，改成普通子代理工具（`agent_id` 寻址）。
+
+本插件的相应改动：
+
+| 项 | 0.2.0 及以前 | 0.2.2 起 |
+|---|---|---|
+| 成员判定 | `agentTeams.tryMembership` | 以侧车为准；**顶层会话＝自己的 Lead**（`kernelTeamUsable()` 判断内核名册 API 是否仍存在） |
+| 结算去重守卫 | `subagents.continuations.activations.notifySettlement` | `subagents.manager.notifySettlement`（前两条路径仍会先尝试） |
+| 旧名别名 | 7 个 | **只剩 3 个**：`spawn_teammate`、`team_task_create`、`team_task_get`（其余名字已归标准子代理工具，重名会顶掉它们） |
+| 内核 Team 实体 | 建议 `disabled: true` | 同样必须禁用 `agent-team`/`tool-agent-team`/`ui-agent-team`，否则内核的 `team_task_*` 会与本插件同名 |
+
+> 升级 `0.2.2` 时 profile 的 `cordis.patch.yml` 被重写成精简版（旧版留在 `cordis.patch.yml.bak-1795711154780`），本插件的配置段与那三条 `disabled` 需要重新补回，否则内核 Team 会复活、而插件因为找不到成员判定 API 而**静默不装任何工具**（状态路由会显示 `tools: []`、`installedAgents: 0`）。
+
 ## 卸载
 
 从 profile 撤下该 bundle：

@@ -392,8 +392,42 @@ await check("the settlement guard is re-driven when the service binds late", asy
   assert.equal(calls.notified[1].childId, "child-b");
 });
 
-await check("the guard wraps the activation registry, not the service object", async () => {
-  // The trap: a service-level method of the same name must stay untouched.
+await check("DSH 0.2.2 exposes the settlement seam as subagents.manager", async () => {
+  // The activation registry is gone in 0.2.2; `notifySettlement` now lives on the
+  // SubagentManager the runtime holds. Without this third path the guard sat on
+  // "pending" forever after the upgrade.
+  const delivered = [];
+  const manager = {
+    notifySettlement(activation, terminal) {
+      delivered.push({ childId: activation?.childId, terminal });
+    }
+  };
+  const services022 = {
+    agents: services.agents,
+    tools: services.tools,
+    systemPrompt: services.systemPrompt,
+    subagents: { manager, sendMessage: () => "m" },
+    agentTeams: undefined
+  };
+  const ctx022 = {
+    get: (name) => services022[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  const state = { options: { dedupeSettlementNotices: true }, stats: { suppressedNotices: 0 } };
+  assert.equal(T.ensureGuard(ctx022, state), "active", "the manager path must count as a usable seam");
+  assert.equal(state.guard?.scope, "subagents.manager");
+  const activation022 = { childId: "c1" };
+  manager.notifySettlement(activation022, { stopReason: "completed" });
+  manager.notifySettlement(activation022, { stopReason: "completed" });
+  manager.notifySettlement({ childId: "c2" }, { stopReason: "completed" });
+  assert.equal(delivered.length, 2, "only the duplicate for one activation is dropped");
+  assert.equal(delivered[0].childId, "c1");
+  assert.equal(delivered[1].childId, "c2");
+});
+
+await check("the guard wraps the activation registry, not the service object", async () => {  // The trap: a service-level method of the same name must stay untouched.
   assert.equal(subagentsService.notifySettlement, undefined, "the service must not grow a notifySettlement of its own");
   assert.equal(T.isOurWrapper(activationsRegistry.notifySettlement), true, "the registry method must be ours");
   // Idempotent: re-driving must not stack another layer.
@@ -1619,9 +1653,13 @@ await check("auto-assign is on unless explicitly disabled", () => {
 });
 
 await check("legacy kernel tool names forward to this plugin", async () => {
-  // Prompts, skills and older docs still say spawn_teammate / send_message /
-  // team_task_create. Registering those names as aliases means such a reference
-  // lands here instead of failing with "unknown tool".
+  // Prompts, skills and older docs still say spawn_teammate / team_task_create.
+  // Registering those names as aliases means such a reference lands here instead
+  // of failing with "unknown tool".
+  //
+  // `send_message`, `list_agents`, `interrupt_agent` and `wait_agent` are NOT
+  // aliased: DSH 0.2.2 turned them into ordinary subagent tools, so a same-named
+  // alias would shadow the standard toolset for every agent.
   const spawned = [];
   const sent = [];
   const lead = makeAgent("alias-lead");
@@ -1664,14 +1702,15 @@ await check("legacy kernel tool names forward to this plugin", async () => {
   assert.equal(spawned.length, 1);
   assert.deepEqual(spawned[0].request.prompt, [{ type: "text", text: "do the old thing" }], "prompt must map to brief, as content blocks");
 
-  // send_message -> team_message
-  await call("send_message", { target: "legacy", message: "hello" });
-  assert.equal(sent.length, 1, "send_message must reach the member");
-  assert.match(JSON.stringify(sent[0].content), /hello/);
+  // The three standard-tool names must stay free for the harness.
+  for (const name of ["send_message", "list_agents", "interrupt_agent", "wait_agent"]) {
+    assert.equal(lead.__registered.has(name), false, `${name} must not be shadowed by an alias`);
+  }
 
-  // list_agents -> team_overview (no pressure measurement)
-  const listed = await call("list_agents", {});
-  assert.ok(Array.isArray(listed.members), "list_agents must return a roster");
+  // team_message itself still works — only its old alias name was dropped.
+  await call("team_message", { target: "legacy", message: "hello" });
+  assert.equal(sent.length, 1, "team_message must reach the member");
+  assert.match(JSON.stringify(sent[0].content), /hello/);
 
   // team_task_create -> team_task_add with the kernel's argument names
   const task = await call("team_task_create", { subject: "old style task", description: "d", write_scopes: ["src/x.js"] });
@@ -1679,12 +1718,7 @@ await check("legacy kernel tool names forward to this plugin", async () => {
   assert.deepEqual(task.task.files, ["src/x.js"]);
   assert.equal(task.task.details, "d");
 
-  // wait_agent must not throw; it points at re-reading instead of blocking.
-  const waited = await call("wait_agent", { timeout_ms: 1000 });
-  assert.equal(waited.ok, true);
-  assert.match(waited.note, /team_overview|team_task_list/);
-
-  // Aliases are conductor-only: under the kernel engine those names still belong
+  // Aliases are sidecar-only: under the kernel engine those names still belong
   // to the kernel bundle, so registering them again would collide.
   const kernelTools = T.buildTools(ctx, { delegationEngine: "kernel", legacyAliases: true }, { stats: {} });
   assert.equal(kernelTools.some((tool) => tool.name === "spawn_teammate"), false, "kernel engine must not alias");
@@ -1767,10 +1801,54 @@ await check("new agents get the tools installed", () => {
   assert.ok(created, "agent/created listener was not registered");
   const late = makeAgent("late-1", { parent: "lead-1" });
   created.callback({ agent: late });
+  // This fixture keeps the kernel roster API, so the resolved engine is `kernel`
+  // and only the nine canonical tools are registered (aliases are sidecar-only).
   assert.equal(late.__registered.size, 9);
   const outsider = makeAgent("outsider-1");
   created.callback({ agent: outsider });
   assert.equal(outsider.__registered.size, 0);
+});
+
+await check("a Team service without membership APIs still lets top-level sessions lead", async () => {
+  // DSH 0.2.2 keeps `ctx.agentTeams` mounted but removes `tryMembership`,
+  // `listMembers` and `spawnTeammate` (Team moved onto the subagent tree). The
+  // lead fallback used to require the service to be ABSENT, so every top-level
+  // session resolved to undefined, no install ran, and the plugin was silently
+  // inert (live: tools [], installedAgents 0). A build without the roster API must
+  // fall back to "top-level session is its own Lead".
+  const root = makeAgent("post-022-root");
+  const live = [root];
+  const services = {
+    agents: { list: () => live, get: (id) => live.find((agent) => agent.id === id) },
+    tools: { register: () => () => {} },
+    systemPrompt: { section: () => () => {} },
+    // Mounted, but stripped exactly like 0.2.2: no roster, no membership.
+    agentTeams: { roster: { maxMembers: 8 }, config: { maxMembers: 8 } },
+    sessionController: {
+      async create() { return { sessionId: "post-022-member" }; },
+      async prompt() { return { accepted: true }; },
+      async rename(request) { return { title: request.title }; },
+      cancel() {},
+      async selectModel() { return { provider: "p", model: "m" }; }
+    },
+    workspaceRegistry: { list: () => [] },
+    subagents: { async sendMessage() { return "m"; } }
+  };
+  const ctx = {
+    get: (name) => services[name],
+    on: () => () => {},
+    effect: (factory) => { factory(); return () => {}; },
+    logger: { info: () => {}, warn: () => {} }
+  };
+  mod.apply(ctx, {}); // auto
+  assert.ok(root.__registered.has("team_overview"), "a top-level session must still get the tools");
+  assert.equal(root.__registered.size, 12, "nine canonical tools plus three aliases");
+  const engine = T.normalizeOptions(ctx, {}).delegationEngine;
+  assert.equal(engine, "auto", "options stay lazy until an agent exists");
+  const overview = await root.__registered.get("team_overview").execute({ include_pressure: false }, { agent: root });
+  const payload = typeof overview?.text === "string" ? JSON.parse(overview.text) : overview;
+  assert.equal(payload.team.root, root.id, "the session is its own Team root");
+  assert.equal(payload.team.capacity.engine, "session");
 });
 
 await check("conductor children receive tools from sidecar membership", async () => {
@@ -2434,8 +2512,12 @@ await check("members are filed under their own workspace so the sidebar stays ti
 
 await check("auto resolves the engine before the tool list is built, so aliases exist", async () => {
   // Live regression: with delegationEngine "auto" the tools were built before the
-  // engine was resolved, so `sidecarEngine(options)` was false and the seven legacy
-  // aliases were never registered — the process reported 9 tools instead of 16.
+  // engine was resolved, so `sidecarEngine(options)` was false and the legacy
+  // aliases were never registered — the process reported only the canonical tools.
+  //
+  // Since DSH 0.2.2 there are three aliases left, not seven: `send_message`,
+  // `list_agents`, `interrupt_agent` and `wait_agent` became ordinary subagent
+  // tools, so aliasing them here would shadow the standard toolset.
   const root = makeAgent("alias-auto-root");
   const live = [root];
   const services = {
@@ -2460,10 +2542,13 @@ await check("auto resolves the engine before the tool list is built, so aliases 
   };
   mod.apply(ctx, {}); // no explicit engine -> auto
   const names = [...root.__registered.keys()];
-  for (const alias of ["spawn_teammate", "send_message", "list_agents", "interrupt_agent", "team_task_create", "team_task_get"]) {
+  for (const alias of ["spawn_teammate", "team_task_create", "team_task_get"]) {
     assert.ok(names.includes(alias), `auto->session must also register the legacy alias ${alias} (got ${names.length} tools)`);
   }
-  assert.equal(names.length, 16, "nine canonical tools plus seven aliases");
+  for (const standard of ["send_message", "list_agents", "interrupt_agent", "wait_agent"]) {
+    assert.equal(names.includes(standard), false, `${standard} now belongs to the harness and must not be shadowed`);
+  }
+  assert.equal(names.length, 12, "nine canonical tools plus three aliases");
 });
 
 await check("auto picks the session engine when the composition can create sessions", async () => {
